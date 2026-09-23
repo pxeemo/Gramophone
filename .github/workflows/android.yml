@@ -12,17 +12,6 @@ on:
       - "*.md"
       - "LICENSE"
 
-  pull_request:
-    branches: ["beta"]
-    paths-ignore:
-      - ".github/**"
-      - "!.github/workflows/**"
-      - ".idea/"
-      - "fastlane/"
-      - ".gitignore"
-      - "*.md"
-      - "LICENSE"
-
   workflow_dispatch:
 
 jobs:
@@ -31,7 +20,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
@@ -47,8 +37,9 @@ jobs:
         run: echo "releaseType=CI" > package.properties
 
       - name: Create temporary signing key
-        if: github.event_name != 'pull_request'
         run: |
+          mkdir -p "$HOME/.gradle"
+
           keytool -genkeypair \
             -keystore "$HOME/key.jks" \
             -storepass android \
@@ -59,45 +50,29 @@ jobs:
             -validity 10000 \
             -dname "CN=Custom Build, OU=Dev, O=Custom, L=Unknown, ST=Unknown, C=US"
 
-          cat >> "$HOME/.gradle/gradle.properties" <<EOF
+          cat > "$HOME/.gradle/gradle.properties" <<EOF
           AKANE_RELEASE_STORE_FILE=$HOME/key.jks
           AKANE_RELEASE_STORE_PASSWORD=android
           AKANE_RELEASE_KEY_ALIAS=custom
           AKANE_RELEASE_KEY_PASSWORD=android
           EOF
 
-      - name: Build release
-        if: github.event_name != 'pull_request'
+      - name: Build release APK
         run: ./gradlew :app:assembleRelease
 
-      - name: Build debug
-        if: github.event_name == 'pull_request'
-        run: ./gradlew :app:assembleDebug
-
-      - name: Find release APK
-        if: github.event_name != 'pull_request'
+      - name: Find APK
         run: |
           APK_FILE=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+
+          if [ -z "$APK_FILE" ]; then
+            echo "No APK found"
+            exit 1
+          fi
+
           echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
           echo "APK_FILE_NAME=$(basename "$APK_FILE" .apk)" >> "$GITHUB_ENV"
 
-      - name: Find debug APK
-        if: github.event_name == 'pull_request'
-        run: |
-          APK_FILE=$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)
-          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
-          echo "APK_FILE_NAME=$(basename "$APK_FILE" .apk)" >> "$GITHUB_ENV"
-
-      - name: Upload release APK
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.APK_FILE_NAME }}
-          path: ${{ env.APK_FILE }}
-          compression-level: 9
-
-      - name: Upload debug APK
-        if: github.event_name == 'pull_request'
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APK_FILE_NAME }}
