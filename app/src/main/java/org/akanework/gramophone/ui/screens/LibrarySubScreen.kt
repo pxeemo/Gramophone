@@ -33,6 +33,12 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import android.content.Context
+import java.util.Locale
+import androidx.compose.ui.platform.LocalConfiguration
+import android.os.Build
+import android.icu.util.MeasureUnit
+import android.icu.util.Measure
+import android.icu.text.MeasureFormat
 import android.content.SharedPreferences
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -58,7 +64,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import org.akanework.gramophone.ui.LocalCardSurface
 import org.akanework.gramophone.ui.THEME_ANIMATION_MS
+import org.akanework.gramophone.ui.cardSurface
+import org.akanework.gramophone.ui.components.player.LocalHarmonizeCovers
 import org.akanework.gramophone.ui.components.player.rememberArtworkColorScheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -81,6 +90,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -103,7 +113,10 @@ import org.akanework.gramophone.logic.utils.flows.PauseManagingSharedFlow.Compan
 import org.akanework.gramophone.logic.utils.flows.provideReplayCacheInvalidationManager
 import org.akanework.gramophone.ui.LibraryAdapterTypes
 import org.akanework.gramophone.ui.actions.LibraryActions
-import org.akanework.gramophone.ui.actions.findMainActivity
+import org.akanework.gramophone.ui.actions.rememberAppActionEnv
+import org.akanework.gramophone.ui.MediaControllerViewModel
+import org.akanework.gramophone.ui.nav.NavViewModel
+import org.koin.compose.viewmodel.koinActivityViewModel
 import org.akanework.gramophone.ui.components.compose.rememberDefaultPreferences
 import org.akanework.gramophone.ui.components.home.GRID_CARD_SIDE_PADDING
 import org.akanework.gramophone.ui.components.home.LIST_HEIGHT
@@ -127,10 +140,12 @@ import org.akanework.gramophone.ui.nav.PlaylistEditKey
 import org.akanework.gramophone.ui.nav.PlaylistKey
 import org.akanework.gramophone.ui.state.LibraryTabSpec
 import org.akanework.gramophone.ui.state.LibraryTabState
+import org.koin.compose.koinInject
 import uk.akane.libphonograph.dynamicitem.Favorite
 import uk.akane.libphonograph.dynamicitem.RecentlyAdded
 import uk.akane.libphonograph.items.Album
 import uk.akane.libphonograph.items.Playlist
+import uk.akane.libphonograph.items.albumId
 import uk.akane.libphonograph.reader.FlowReader
 import kotlin.math.roundToInt
 
@@ -141,6 +156,11 @@ private class LibrarySubPage(
     val albums: LibraryTabState<Album>? = null,
     /** Id of the playlist the edit button opens, when this is an editable playlist. */
     val editablePlaylistId: Long? = null,
+    /**
+     * Whether song rows show their cover next to the number, for songs of different albums. Only
+     * an album page leaves it off, and shows covers only when its songs span several albums.
+     */
+    val numberedCovers: Boolean = true,
 ) {
     companion object {
         fun create(
@@ -161,6 +181,7 @@ private class LibrarySubPage(
                             LibraryTabSpec.SubSongs(LibraryAdapterTypes.ALBUM_SONGS, Sorter.Type.ByAlbumTitleAscending),
                             item.map { it?.songList ?: emptyList() },
                         ),
+                        numberedCovers = false,
                     )
                 }
                 is GenreKey -> {
@@ -228,6 +249,20 @@ private class LibrarySubPage(
     }
 }
 
+/**
+ * Whether [songs] come from more than one album, going by the album ids in their extras. Songs
+ * without an id are skipped, so a list without ids counts as one album.
+ */
+private fun songsSpanAlbums(songs: List<MediaItem>): Boolean {
+    var first: Long? = null
+    for (song in songs) {
+        val id = song.mediaMetadata.albumId ?: continue
+        if (first == null) first = id
+        else if (id != first) return true
+    }
+    return false
+}
+
 private fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
 private fun lcm(a: Int, b: Int): Int = a / gcd(a, b) * b
 
@@ -238,12 +273,13 @@ private fun lcm(a: Int, b: Int): Int = a / gcd(a, b) * b
 @Composable
 fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val activity = remember(context) { context.findMainActivity() }
+    val env = rememberAppActionEnv()
+    val reader = koinInject<FlowReader>()
     val prefs = rememberDefaultPreferences()
     val scope = rememberCoroutineScope()
     // Entries of this page's kind, shown in the carousel. Keyed on the initial key only, so
     // switching entries does not rebuild the list and reset the carousel position.
-    val siblings = remember(key) { siblingEntries(key, activity.reader, prefs, scope) }
+    val siblings = remember(key) { siblingEntries(key, reader, prefs, scope) }
     siblings.Collect()
     // Index of the shown entry, or -1 until the list has loaded (then the initial key is shown).
     // Saved so the selected entry survives recreation.
@@ -285,7 +321,7 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
     // Subtitle under the title, e.g. an album's artist or the song count.
     val subtitle = siblings.subtitleAt(currentIndex)
     val page = remember(entryToken(currentKey)) {
-        LibrarySubPage.create(currentKey, context, activity.reader, prefs, scope)
+        LibrarySubPage.create(currentKey, context, reader, prefs, scope)
     }
     // Keeps the previous title until the new one loads, so the large title never becomes empty.
     val title = remember { mutableStateOf("") }
@@ -308,15 +344,24 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
         targetScheme.surfaceContainerLow, tween(THEME_ANIMATION_MS), label = "background",
     )
     val sheet = animateColorAsState(targetScheme.surface, tween(THEME_ANIMATION_MS), label = "sheet")
-    // The mini player and the playing row are harmonized to the page's accent. The mini player
-    // uses the accent of the top page, so it reverts when this page is popped.
-    val accent = if (tinted) targetScheme.primary else null
-    val pageAccents = activity.navViewModel.pageAccents
-    SideEffect { if (accent != null) pageAccents[key] = accent else pageAccents.remove(key) }
-    DisposableEffect(key) { onDispose { pageAccents.remove(key) } }
+    // Only a page that really took the cover's colours counts as tinted from here on: without
+    // a usable cover it keeps the app theme, and everything is harmonized as usual.
+    val colored = tinted && targetScheme !== MaterialTheme.colorScheme
+    // The dialogs shown from the top page take its scheme, and the mini player and the playing
+    // row stop leaning towards the app's hue on it. The mini player follows the top page, so it
+    // reverts when this page is popped.
+    val navViewModel = koinActivityViewModel<NavViewModel>()
+    val pageSchemes = navViewModel.pageSchemes
+    SideEffect { if (colored) pageSchemes[key] = targetScheme else pageSchemes.remove(key) }
+    DisposableEffect(key) { onDispose { pageSchemes.remove(key) } }
     val nowPlaying = rememberNowPlayingState(
-        activity.controllerViewModel, LocalLifecycleOwner.current.lifecycle, accent,
+        koinActivityViewModel<MediaControllerViewModel>(), LocalLifecycleOwner.current.lifecycle,
+        harmonize = !colored,
     )
+    // The cards (the item sheet's actions, the artist's album cards) sit on the page's surfaces.
+    val cardSurface = remember(targetScheme) {
+        if (colored) cardSurface(targetScheme, targetScheme.surface.luminance() < 0.5f) else null
+    }
     CollectLibraryItems(page.songs)
     page.albums?.let { CollectLibraryItems(it) }
     val density = LocalDensity.current
@@ -328,6 +373,10 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
     val songs = page.songs
     val albums = page.albums
     val songLayout = songs.layoutType
+    // An album's rows only need covers when its songs come from different albums, e.g. an
+    // album title shared by several albums. Read from the songs' extras, so no IO.
+    val numberedCovers = page.numberedCovers ||
+        remember(songs.items) { songsSpanAlbums(songs.items) }
     val songCols = libraryColumns(songLayout)
     val albumLayout = albums?.layoutType
     val albumCols = if (albums != null) libraryColumns(albumLayout) else 1
@@ -361,7 +410,11 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
     val hazeState = remember { HazeState() }
     val barTopPadding = contentTop
     MaterialTheme(colorScheme = targetScheme) {
-        CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
+        CompositionLocalProvider(
+            LocalContentColor provides MaterialTheme.colorScheme.onSurface,
+            LocalCardSurface provides (cardSurface ?: LocalCardSurface.current),
+            LocalHarmonizeCovers provides !colored,
+        ) {
             Box(modifier.drawBehind { drawRect(background.value) }) {
                 // The list sits behind the frosted bar as its blur source, padded clear of it at the top.
                 // The background is painted inside the source so the recorded layer is opaque.
@@ -384,7 +437,9 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                         item(key = "title", span = { GridItemSpan(maxLineSpan) }) {
                             LargeTitle(
                                 title.value, titleState, scrolled,
-                                subtitle = subtitle, marquee = true,
+                                // Reserve the subtitle line until the siblings load, so the list
+                                // below doesn't jump down when it arrives a few frames later.
+                                subtitle = subtitle ?: "", marquee = true,
                                 style = textViewStyle(TITLE_SIZE, 400, MaterialTheme.colorScheme.onSurface)
                                     .copy(platformStyle = PlatformTextStyle(includeFontPadding = false)),
                                 contentKey = entryToken(currentKey),
@@ -394,8 +449,8 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                                 bottomGap = TITLE_GAP,
                                 trailing = {
                                     TitleButtons(
-                                        onPlay = { LibraryActions.playAll(activity, songs.items, title.value) },
-                                        onShuffle = { LibraryActions.shuffleAll(activity, songs.items, title.value) },
+                                        onPlay = { LibraryActions.playAll(env, songs.items, title.value) },
+                                        onShuffle = { LibraryActions.shuffleAll(env, songs.items, title.value) },
                                     )
                                 },
                             )
@@ -419,7 +474,7 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                                         end = if (albumIsGrid && column == albumCols - 1) GRID_CARD_SIDE_PADDING else 0.dp,
                                     )
                                 ) {
-                                    LibraryItem(albums, item, nowPlaying, activity, albums.layoutType)
+                                    LibraryItem(albums, item, nowPlaying, env, albums.layoutType)
                                 }
                             }
                         }
@@ -429,13 +484,16 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                             span = { _, _ -> GridItemSpan(cols / songCols) },
                         ) { index, item ->
                             LibraryItem(
-                                songs, item, nowPlaying, activity, songLayout, Modifier.animateItem(),
+                                songs, item, nowPlaying, env, songLayout, Modifier.animateItem(),
                                 number = index + 1,
+                                numberedCover = numberedCovers,
+                                // The playing song's container keeps clear of the sheet's edges.
+                                containerInset = PLAYING_ROW_INSET,
                             )
                         }
                         if (songs.items.isNotEmpty()) {
                             item(key = "songs-footer", span = { GridItemSpan(maxLineSpan) }) {
-                                SongsFooter(songs.items)
+                                SongsFooter(songs.items, showCount = !libraryItemSubtitleIsCount(siblings.state))
                             }
                         }
                     }
@@ -460,8 +518,10 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                     scrolled = scrolled,
                     toolbarPaddingStart = TOOLBAR_BUTTON_PADDING_START,
                     toolbarPaddingEnd = TOOLBAR_BUTTON_PADDING_END,
-                    // Leaves room for the back button docked in the toolbar.
+                    // Leaves room for the buttons docked in the toolbar.
                     titlePaddingStart = TOOLBAR_TITLE_PADDING,
+                    // Sort, and edit for an editable playlist.
+                    titlePaddingEnd = toolbarTitlePaddingEnd(if (page.editablePlaylistId != null) 2 else 1),
                     // No blur at rest, since no content is under the bar yet.
                     frost = { (pageScroll() / frostSpanPx).coerceIn(0f, 1f) },
                 )
@@ -470,10 +530,13 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                 CarouselButtons(
                     scrolled = pageScroll,
                     topInset = topInset,
+                    atLastEntry = siblings.itemCount > 1 &&
+                            carouselState.currentItem == siblings.itemCount - 1,
                     onBack = onBack,
                     onEdit = page.editablePlaylistId?.let { id ->
-                        { activity.navigateTo(PlaylistEditKey(id)) }
+                        { navViewModel.navigateTo(PlaylistEditKey(id)) }
                     },
+                    sortMenu = { expanded, onDismiss -> LibrarySortMenu(songs, expanded, onDismiss) },
                 )
             }
         }
@@ -482,6 +545,9 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
 
 /** Title size, smaller than the library's large title to fit next to the buttons. */
 private val TITLE_SIZE = 28.sp
+
+/** Inset of the playing song's rounded container from the sheet's sides. */
+private val PLAYING_ROW_INSET = 8.dp
 
 /** Gap between the title and the carousel above and the sheet below. */
 private val TITLE_GAP = 24.dp
@@ -517,20 +583,45 @@ private fun DrawScope.drawListSheet(grid: LazyGridState, color: Color, corner: F
     )
 }
 
-/** Footer after the last song with the song count and total duration. */
+/**
+ * Footer after the last song with the total duration, and the song count unless the title's
+ * subtitle already shows it.
+ */
 @Composable
-private fun SongsFooter(songs: List<MediaItem>) {
+private fun SongsFooter(songs: List<MediaItem>, showCount: Boolean) {
     val count = songs.size
     val total = remember(songs) { songs.sumOf { it.mediaMetadata.durationMs ?: 0L } }
+    val locale = LocalConfiguration.current.locales[0]
+    val duration = remember(total, locale) { formatTotalDuration(total, locale) }
     SingleLineText(
-        stringResource(
+        if (showCount) stringResource(
             R.string.songs_total_duration,
             pluralStringResource(R.plurals.songs, count, count),
-            convertDurationToTimeStamp(total),
-        ),
+            duration,
+        ) else stringResource(R.string.songs_total_length, duration),
         14.sp, 400, MaterialTheme.colorScheme.onSurfaceVariant,
         Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
     )
+}
+
+/**
+ * A list's total length in words, as "1 hour, 12 minutes" or "38 minutes". Leftover seconds are
+ * dropped, and only shown for lists under a minute. Falls back to "1:12:05" before API 24.
+ */
+private fun formatTotalDuration(ms: Long, locale: Locale): String {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return convertDurationToTimeStamp(ms)
+    val format = MeasureFormat.getInstance(locale, MeasureFormat.FormatWidth.WIDE)
+    val seconds = ms / 1000
+    if (seconds < 60) return format.format(Measure(seconds, MeasureUnit.SECOND))
+    val minutes = seconds / 60
+    val hours = minutes / 60
+    return when {
+        hours == 0L -> format.format(Measure(minutes, MeasureUnit.MINUTE))
+        minutes % 60 == 0L -> format.format(Measure(hours, MeasureUnit.HOUR))
+        else -> format.formatMeasures(
+            Measure(hours, MeasureUnit.HOUR), Measure(minutes % 60, MeasureUnit.MINUTE),
+        )
+    }
 }
 
 private val TITLE_BUTTON_SIZE = 56.dp

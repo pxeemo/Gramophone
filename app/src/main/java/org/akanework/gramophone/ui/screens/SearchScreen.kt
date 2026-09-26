@@ -53,7 +53,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
@@ -66,7 +65,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import org.akanework.gramophone.R
 import org.akanework.gramophone.ui.LibraryAdapterTypes
-import org.akanework.gramophone.ui.actions.findMainActivity
+import org.akanework.gramophone.ui.MediaControllerViewModel
+import org.koin.compose.viewmodel.koinActivityViewModel
 import org.akanework.gramophone.ui.components.compose.rememberDefaultPreferences
 import org.akanework.gramophone.ui.components.home.GLASS_BAR_HEIGHT
 import org.akanework.gramophone.ui.components.home.LibraryIconButton
@@ -79,6 +79,8 @@ import org.akanework.gramophone.ui.library.Sorter
 import org.akanework.gramophone.ui.nav.LocalAppBarTopPadding
 import org.akanework.gramophone.ui.state.LibraryTabSpec
 import org.akanework.gramophone.ui.state.LibraryTabState
+import org.koin.compose.koinInject
+import uk.akane.libphonograph.reader.FlowReader
 
 /*
  * The search page: a text field in the glass bar, and under it the song list filtered by what
@@ -89,15 +91,14 @@ private val FIELD_TEXT_SIZE = 18.sp
 
 @Composable
 fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val activity = remember(context) { context.findMainActivity() }
+    val reader = koinInject<FlowReader>()
     val prefs = rememberDefaultPreferences()
     val scope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf(initialQuery ?: "") }
     val queryFlow = remember { MutableStateFlow(query) }
     LaunchedEffect(query) { queryFlow.value = query }
     val state = remember {
-        val songs = activity.reader.songListFlow.combine(queryFlow) { list, raw ->
+        val songs = reader.songListFlow.combine(queryFlow) { list, raw ->
             val text = raw.trim()
             list.filter {
                 it.mediaMetadata.title?.contains(text, true) == true ||
@@ -107,13 +108,13 @@ fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier =
         }
         LibraryTabState(
             LibraryTabSpec.SubSongs(LibraryAdapterTypes.SEARCH, Sorter.Type.ByTitleAscending),
-            prefs, activity.reader, scope, flowOverride = songs,
+            prefs, reader, scope, flowOverride = songs,
         )
     }
     val queueTitle = stringResource(R.string.search_query, query)
     LaunchedEffect(queueTitle) { state.queueTitleOverride = queueTitle }
     val nowPlaying = rememberNowPlayingState(
-        activity.controllerViewModel, LocalLifecycleOwner.current.lifecycle
+        koinActivityViewModel<MediaControllerViewModel>(), LocalLifecycleOwner.current.lifecycle
     )
     val overscroll = rememberIosOverscrollState()
     val hazeState = remember { HazeState() }
@@ -142,7 +143,7 @@ fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier =
                 Modifier
                     .fillMaxWidth()
                     .height(barTopPadding)
-                    .topEdgeBlur(hazeState, glassHazeStyle()),
+                    .topEdgeBlur(hazeState, glassHazeStyle(), background),
             )
             Row(
                 Modifier

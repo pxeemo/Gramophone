@@ -88,6 +88,13 @@ import uk.akane.libphonograph.items.EXTRA_FILE
 import java.io.File
 import java.util.Locale
 
+/**
+ * Whether a play/pause button should show pause: playback is requested ([Player.getPlayWhenReady])
+ * and has not ended. Unlike [Player.isPlaying] it stays put while buffering or seeking.
+ */
+val Player.showsPause: Boolean
+    get() = playWhenReady && playbackState != Player.STATE_ENDED
+
 fun Player.playOrPause() {
     if (playWhenReady) {
         if (playbackState == Player.STATE_ENDED)
@@ -408,9 +415,6 @@ fun Context.supportsWideScreen() : Boolean {
     return config.screenWidthDp >= 780
 }
 
-val Context.gramophoneApplication
-    get() = this.applicationContext as GramophoneApplication
-
 /** The app's default SharedPreferences: `<package>_preferences`, PreferenceManager's default file. */
 val Context.defaultPrefs: SharedPreferences
     get() = applicationContext.getSharedPreferences("${packageName}_preferences", Context.MODE_PRIVATE)
@@ -515,8 +519,8 @@ inline fun hasImprovedMediaStore(): Boolean =
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
 @Suppress("NOTHING_TO_INLINE")
-inline fun hasScopedStorageV2(): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+inline fun hasScopedStorageV2(sdkInt: Int = Build.VERSION.SDK_INT): Boolean =
+    sdkInt >= Build.VERSION_CODES.R
 
 @Suppress("NOTHING_TO_INLINE")
 inline fun hasScopedStorageV1(): Boolean =
@@ -527,8 +531,8 @@ inline fun hasRenderNodes(): Boolean =
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
 @Suppress("NOTHING_TO_INLINE")
-inline fun hasScopedStorageWithMediaTypes(): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+inline fun hasScopedStorageWithMediaTypes(sdkInt: Int = Build.VERSION.SDK_INT): Boolean =
+    sdkInt >= Build.VERSION_CODES.TIRAMISU
 
 @Suppress("NOTHING_TO_INLINE")
 inline fun mayThrowForegroundServiceStartNotAllowed(): Boolean =

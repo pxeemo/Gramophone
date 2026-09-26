@@ -137,6 +137,7 @@ import org.akanework.gramophone.logic.utils.exoplayer.GramophoneRenderFactory
 import org.akanework.gramophone.ui.AudioPreviewActivity
 import org.akanework.gramophone.ui.LyricWidgetProvider
 import org.akanework.gramophone.ui.MainActivity
+import org.akanework.gramophone.ui.intent.PlayIntents
 import org.akanework.gramophone.ui.fragments.compose.MqState.Companion.CLIENT_QB_REFRESH_ALL
 import org.akanework.gramophone.ui.fragments.compose.MqState.Companion.CLIENT_QB_REFRESH_CLEAR
 import org.akanework.gramophone.ui.fragments.compose.MqState.Companion.CLIENT_QB_REFRESH_ITEM
@@ -147,7 +148,9 @@ import uk.akane.libphonograph.dynamicitem.Favorite
 import uk.akane.libphonograph.items.albumId
 import uk.akane.libphonograph.manipulator.ItemManipulator
 import uk.akane.libphonograph.manipulator.PlaylistSerializer
+import org.koin.android.ext.android.inject
 import uk.akane.libphonograph.manipulator.PlaylistSerializer.Entry
+import uk.akane.libphonograph.reader.FlowReader
 import java.util.concurrent.Executor
 import kotlin.random.Random
 
@@ -200,6 +203,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         get() = mediaSession?.player as EndedWorkaroundPlayer?
 
     private lateinit var libraryTreeLoader: LibraryTreeLoader
+    private val reader: FlowReader by inject()
 
     private var controller: MediaBrowser? = null
     lateinit var qb: QueueBoard
@@ -462,7 +466,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         lastPlayedManager.allowSavingState = false
         libraryTreeLoader = LibraryTreeLoader(
             this,
-            gramophoneApplication,
+            reader,
             lifecycleScope,
             prefs
         )
@@ -654,7 +658,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
             }
         }
         scope.launch(Dispatchers.Default) {
-            gramophoneApplication.reader.playlistListFlow.map { it.find { p -> p is Favorite } }
+            reader.playlistListFlow.map { it.find { p -> p is Favorite } }
                 .collect { list ->
                     val ids = list?.songList?.map { it.mediaId } ?: emptyList()
                     withContext(Dispatchers.Main + NonCancellable) {
@@ -712,7 +716,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
         }
         val completion = SettableFuture.create<SessionResult>()
         lifecycleScope.launch(Dispatchers.Default) {
-            val item = gramophoneApplication.reader.songListFlow.map {
+            val item = reader.songListFlow.map {
                 it.find { s -> s.mediaId == mediaId } }.first()
             if (item == null) {
                 completion.set(SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE))
@@ -723,7 +727,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                 completion.set(SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE))
                 return@launch
             }
-            val uriIn = gramophoneApplication.reader.playlistListFlow.map { it.find { p ->
+            val uriIn = reader.playlistListFlow.map { it.find { p ->
                 p is Favorite } }.first()?.id?.let {
                 ContentUris.withAppendedId(@Suppress("deprecation")
                 MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, it)
@@ -743,7 +747,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                         this@GramophonePlaybackService, ItemManipulator
                             .getDefaultPlaylistFile(ItemManipulator.FAVORITES))
                     val readback = if (uriIn != null) ItemManipulator.readbackPlaylist(
-                        this@GramophonePlaybackService, uri) else
+                        this@GramophonePlaybackService, reader, uri) else
                             PlaylistSerializer.Playlist.create()
                     val newSongs = if (rating.isHeart) {
                         readback.entries + song
@@ -775,8 +779,8 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                                 this@GramophonePlaybackService,
                                 PENDING_INTENT_FAVE_ID,
                                 Intent(this@GramophonePlaybackService, MainActivity::class.java)
-                                    .putExtra(MainActivity.FAVORITE_ENTRY, song)
-                                    .putExtra(MainActivity.FAVORITE_STATE, rating.isHeart),
+                                    .putExtra(PlayIntents.FAVORITE_ENTRY, song)
+                                    .putExtra(PlayIntents.FAVORITE_STATE, rating.isHeart),
                                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                             )
                         )
@@ -1664,7 +1668,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
     }
 
     private suspend fun mapMediaItemsForFavorites(mediaItems: List<MediaItem>): List<MediaItem> {
-        val favorites = gramophoneApplication.reader.playlistListFlow.map { it.find { p ->
+        val favorites = reader.playlistListFlow.map { it.find { p ->
             p is Favorite } }.first()?.songList?.map { it.mediaId } ?: emptyList()
         return mediaItems.map { item ->
             val isHeart = (item.mediaMetadata.userRating as? HeartRating)
@@ -1898,7 +1902,7 @@ class GramophonePlaybackService : MediaLibraryService(), MediaSessionService.Lis
                         this@GramophonePlaybackService,
                         PENDING_INTENT_NOTIFY_ID,
                         Intent(this@GramophonePlaybackService, MainActivity::class.java)
-                            .putExtra(MainActivity.PLAYBACK_AUTO_START_FOR_FGS, true),
+                            .putExtra(PlayIntents.PLAYBACK_AUTO_START_FOR_FGS, true),
                         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                     )
                 )

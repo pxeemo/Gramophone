@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Text
@@ -18,12 +19,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -38,6 +41,9 @@ import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
 import org.akanework.gramophone.ui.components.compose.AppDialogHost
 import org.akanework.gramophone.ui.components.compose.AppDialogHostState
+import org.akanework.gramophone.ui.components.compose.LocalAppDialogs
+import org.akanework.gramophone.ui.components.player.LocalPlayerSheet
+import org.akanework.gramophone.ui.components.player.PlayerSheetController
 import org.akanework.gramophone.ui.screens.HomeScreen
 import org.akanework.gramophone.ui.screens.LibrarySubScreen
 import org.akanework.gramophone.ui.screens.PlaylistEditScreen
@@ -56,6 +62,7 @@ import org.akanework.gramophone.ui.screens.settings.OssLicensesScreen
 import org.akanework.gramophone.ui.screens.settings.PlayerSettingsScreen
 import org.akanework.gramophone.ui.screens.settings.ReplayGainSettingsScreen
 import org.akanework.gramophone.ui.screens.settings.ThemeSettingsScreen
+import org.koin.compose.viewmodel.koinActivityViewModel
 
 sealed interface AppNavKey : NavKey {
     val wantsPlayer: Boolean
@@ -94,11 +101,18 @@ class ArtistKey(val id: Long?, val albumArtist: Boolean) : LibrarySubKey
 class NavViewModel : ViewModel() {
     val backStack: SnapshotStateList<AppNavKey> = mutableStateListOf(HomeKey)
 
-    /** Accent color per back stack entry, used to harmonize the mini player. */
-    val pageAccents: SnapshotStateMap<AppNavKey, Color> = mutableStateMapOf()
+    /**
+     * Color scheme per back stack entry that is themed from a cover. The dialogs take the top
+     * page's, and the mini player stops harmonizing to the app's hue on top of one.
+     */
+    val pageSchemes: SnapshotStateMap<AppNavKey, ColorScheme> = mutableStateMapOf()
 
-    /** Accent of the top page, or null if it uses the app colors. */
-    val topAccent: Color? get() = backStack.lastOrNull()?.let { pageAccents[it] }
+    /** Scheme of the top page, or null if it uses the app colors. */
+    val topScheme: ColorScheme? get() = backStack.lastOrNull()?.let { pageSchemes[it] }
+
+    fun navigateTo(key: AppNavKey) {
+        backStack.add(key)
+    }
 }
 
 /** Bottom padding (px) content should keep clear so the mini player does not cover it. */
@@ -113,32 +127,50 @@ val LocalAppBarTopPadding = compositionLocalOf { 0.dp }
  */
 val LocalListBottomPadding = compositionLocalOf<Dp?> { null }
 
-fun SnapshotStateList<AppNavKey>.popIfPossible() {
-    if (size > 1) removeAt(size - 1)
-}
-
 /** True while a page covers the always-composed home (so it can pause its animations). */
 val LocalHomeCovered = compositionLocalOf { false }
 
+/** Reports the app as fully drawn, which also ends the splash screen. No-op by default. */
+val LocalReportFullyDrawn = staticCompositionLocalOf<() -> Unit> { {} }
+
 private val HOME_CONTENT_KEY: Any = NavEntry<AppNavKey>(HomeKey, content = {}).contentKey
 
+/**
+ * The pages, the dialogs and snackbar, and above them all the player sheet. Provides [dialogs]
+ * and [playerSheet] to the pages.
+ */
 @Composable
 fun AppRoot(
     backStack: SnapshotStateList<AppNavKey>,
-    onPlayerVisibleChanged: (Boolean) -> Unit,
-    playerBottomPadding: Int,
+    playerSheet: PlayerSheetController,
     dialogs: AppDialogHostState,
     debug: Boolean,
 ) {
     val top = backStack.lastOrNull()
+    val navViewModel = koinActivityViewModel<NavViewModel>()
     LaunchedEffect(top) {
-        top?.let { onPlayerVisibleChanged(it.wantsPlayer) }
+        top?.let { playerSheet.visible = it.wantsPlayer }
     }
+    val playerBottomPadding = playerSheet.bottomPadding
     Box(Modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalPlayerBottomPadding provides playerBottomPadding) {
-            AppNavHost(backStack)
+        CompositionLocalProvider(
+            LocalAppDialogs provides dialogs,
+            LocalPlayerSheet provides playerSheet,
+        ) {
+            CompositionLocalProvider(LocalPlayerBottomPadding provides playerBottomPadding) {
+                // Not drawn while the expanded player covers them: the lyrics redraw every frame
+                // while they scroll, and would have the pages (and their blurred bars) redrawn
+                // underneath each time.
+                AppNavHost(
+                    backStack,
+                    Modifier.drawWithContent { if (!playerSheet.coversScreen) drawContent() },
+                )
+            }
         }
-        AppDialogHost(dialogs)
+        // A page themed from a cover shows its dialogs in its own colors.
+        MaterialTheme(colorScheme = navViewModel.topScheme ?: MaterialTheme.colorScheme) {
+            AppDialogHost(dialogs)
+        }
         // Above the mini player when it shows, else above the navigation bar.
         val snackbarBottom = if (playerBottomPadding > 0) with(LocalDensity.current) { playerBottomPadding.toDp() }
             else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -155,6 +187,9 @@ fun AppRoot(
                     .padding(start = 16.dp),
             )
         }
+        // Drawn above the pages, dialogs and snackbar. Composed after the pages so its back
+        // callback takes priority over theirs.
+        playerSheet.Content()
     }
 }
 
@@ -166,7 +201,7 @@ fun AppRoot(
  * shared-axis transition of a real entry when pages are pushed or popped.
  */
 @Composable
-private fun AppNavHost(backStack: SnapshotStateList<AppNavKey>) {
+private fun AppNavHost(backStack: SnapshotStateList<AppNavKey>, modifier: Modifier = Modifier) {
     val density = LocalDensity.current
     val offset = with(density) { NAV_TRANSITION_DISTANCE.roundToPx() } *
         if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1 else -1
@@ -229,7 +264,7 @@ private fun AppNavHost(backStack: SnapshotStateList<AppNavKey>) {
     }
     // What the preview reveals around the two containers. Left to the window, it would be the
     // XML theme's surface, resolved once from the system palette and brightness.
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)) {
+    Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)) {
         Box(
             Modifier
                 .fillMaxSize()

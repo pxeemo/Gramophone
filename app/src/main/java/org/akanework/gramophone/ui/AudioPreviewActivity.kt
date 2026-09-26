@@ -16,9 +16,11 @@
  */
 package org.akanework.gramophone.ui
 
+import org.akanework.gramophone.logic.showsPause
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
@@ -88,8 +90,6 @@ import org.akanework.gramophone.R
 import org.akanework.gramophone.logic.getStringStrict
 import org.akanework.gramophone.logic.hasAudioPermission
 import org.akanework.gramophone.logic.hasScopedStorageV1
-import org.akanework.gramophone.logic.hasScopedStorageV2
-import org.akanework.gramophone.logic.hasScopedStorageWithMediaTypes
 import org.akanework.gramophone.logic.playOrPause
 import org.akanework.gramophone.logic.ui.BaseActivity
 import org.akanework.gramophone.logic.utils.CalculationUtils.convertDurationToTimeStamp
@@ -99,6 +99,8 @@ import org.akanework.gramophone.logic.utils.exoplayer.GramophoneExtractorsFactor
 import org.akanework.gramophone.logic.utils.exoplayer.GramophoneMediaSourceFactory
 import org.akanework.gramophone.logic.utils.exoplayer.GramophoneRenderFactory
 import org.akanework.gramophone.ui.components.compose.rememberBooleanPreference
+import org.akanework.gramophone.ui.components.compose.requiredLibraryPermissions
+import org.akanework.gramophone.ui.intent.PlayIntents
 import org.akanework.gramophone.ui.components.home.LibraryCover
 import org.akanework.gramophone.ui.components.home.rememberDefaultCoverPainter
 import org.akanework.gramophone.ui.components.home.textViewStyle
@@ -127,6 +129,7 @@ private class PreviewState {
     var positionMs by mutableLongStateOf(0L)
     var durationMs by mutableLongStateOf(0L)
     var isPlaying by mutableStateOf(false)
+    var showPause by mutableStateOf(false)
     var canOpen by mutableStateOf(false)
 }
 
@@ -188,6 +191,14 @@ class AudioPreviewActivity : BaseActivity() {
                 state.isPlaying = isPlaying
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                state.showPause = player.showsPause
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                state.showPause = player.showsPause
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (mediaItem == null) return
                 updateMediaMetadata()
@@ -227,15 +238,7 @@ class AudioPreviewActivity : BaseActivity() {
         if (!hasAudioPermission())
             ActivityCompat.requestPermissions(
                 this,
-                if (hasScopedStorageWithMediaTypes())
-                    arrayOf(android.Manifest.permission.READ_MEDIA_AUDIO)
-                else if (hasScopedStorageV2())
-                    arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
-                else
-                    arrayOf(
-                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
-                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    ),
+                requiredLibraryPermissions(Build.VERSION.SDK_INT),
                 PERMISSION_READ_MEDIA_AUDIO,
             )
         else
@@ -262,10 +265,10 @@ class AudioPreviewActivity : BaseActivity() {
         }?.let { id ->
             startActivity(Intent(this, MainActivity::class.java).also {
                 it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                it.putExtra(MainActivity.PLAYBACK_AUTO_PLAY_ID, id)
+                it.putExtra(PlayIntents.PLAYBACK_AUTO_PLAY_ID, id)
                 player.contentPosition.let { pos ->
                     if (pos != C.TIME_UNSET)
-                        it.putExtra(MainActivity.PLAYBACK_AUTO_PLAY_POSITION, pos)
+                        it.putExtra(PlayIntents.PLAYBACK_AUTO_PLAY_POSITION, pos)
                 }
             })
         }
@@ -478,7 +481,7 @@ private fun PreviewContent(
                 Modifier.size(48.dp).clickable(onClick = onPlayPause),
                 contentAlignment = Alignment.Center,
             ) {
-                PlayPauseIcon(playing = state.isPlaying, tint = scheme.onSurface, modifier = Modifier.size(28.dp))
+                PlayPauseIcon(playing = state.showPause, tint = scheme.onSurface, modifier = Modifier.size(28.dp))
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -510,6 +513,7 @@ private fun PreviewContent(
                     onSeek((it * duration).toLong())
                     scrub = null
                 },
+                onScrubCancel = { scrub = null },
             )
         }
         Row(Modifier.fillMaxWidth()) {

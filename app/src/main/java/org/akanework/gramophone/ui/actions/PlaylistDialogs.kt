@@ -17,68 +17,49 @@
 
 package org.akanework.gramophone.ui.actions
 
-import android.app.Activity
 import android.content.ContentUris
-import android.content.Context
-import android.os.Bundle
 import android.provider.MediaStore
 import android.widget.Toast
-import androidx.media3.common.util.Log
-import kotlinx.coroutines.CoroutineScope
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
+import androidx.media3.common.MediaItem
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.akanework.gramophone.R
-import org.akanework.gramophone.ui.MainActivity
-import org.akanework.gramophone.ui.actions.PlaylistDialogs.rename
 import org.akanework.gramophone.ui.components.compose.AppDialog
-import org.nift4.mediastorecompat.MediaStoreCompat
+import uk.akane.libphonograph.dynamicitem.Favorite
 import uk.akane.libphonograph.items.Playlist
 import uk.akane.libphonograph.manipulator.ItemManipulator
-import uk.akane.libphonograph.manipulator.PlaylistSerializer
+import uk.akane.libphonograph.manipulator.PlaylistSerializer.Entry
 import java.io.File
+import kotlin.time.Duration.Companion.milliseconds
 
-/** The playlist create and rename dialogs. */
+/** The playlist create, rename and add-to-playlist dialogs. */
 object PlaylistDialogs {
-    private const val TAG = "PlaylistDialogs"
-
-    fun create(activity: MainActivity) {
-        val context: Context = activity
-        playlistNameDialog(activity, R.string.create_playlist, "",
+    fun create(env: AppActionEnv) {
+        playlistNameDialog(env, R.string.create_playlist, "",
             { ItemManipulator.getDefaultPlaylistFile(it) }) { path ->
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val uri = ItemManipulator.createPlaylist(context, path)
-                    ItemManipulator.setPlaylistContent(
-                        context, uri, PlaylistSerializer.Playlist.create(), true
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, Log.getThrowableString(e)!!)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(
-                            context, context.getString(
-                                R.string.create_failed_playlist,
-                                e.javaClass.name + ": " + e.message
-                            ),
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                }
-            }
+            env.writes.createPlaylist(path)
         }
     }
 
-    fun rename(activity: MainActivity, item: Playlist) {
+    fun rename(env: AppActionEnv, item: Playlist) {
         val id = item.id
         if (id == null) {
             Toast.makeText(
-                activity, activity.getString(R.string.rename_failed_playlist, "$item"),
+                env.context, env.getString(R.string.rename_failed_playlist, "$item"),
                 Toast.LENGTH_LONG
             ).show()
             return
         }
         playlistNameDialog(
-            activity,
+            env,
             R.string.rename_playlist,
             item.title ?: "",
             { name ->
@@ -87,80 +68,96 @@ object PlaylistDialogs {
                 )
             }
         ) { path ->
-            val uri = ContentUris.withAppendedId(
-                @Suppress("deprecation") MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, id
-            )
-            val data = Bundle().apply {
-                putLong("Id", id)
-                putString("Path", path.absolutePath)
-            }
-            CoroutineScope(Dispatchers.Default).launch {
-                val token = MediaStoreCompat.needRequestEfficientMove(
-                    activity, uri, path.parent ?: ""
-                )
-                if (token != null) {
-                    val pendingIntent = MediaStoreCompat.createWriteRequest(activity, listOf(token))
-                    withContext(Dispatchers.Main) {
-                        activity.requestPlaylistRename(pendingIntent.intentSender, data)
-                    }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        continueRename(activity, Activity.RESULT_OK, data)
-                    }
-                }
-            }
+            env.writes.renamePlaylist(id, path)
         }
     }
 
-    /** Second half of [rename], after the MediaStore write permission came back. */
-    fun continueRename(context: Context, resultCode: Int, data: Bundle) {
-        if (resultCode == Activity.RESULT_OK) {
-            val uri = ContentUris.withAppendedId(
-                @Suppress("deprecation") MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI,
-                data.getLong("Id")
-            )
-            val path = data.getString("Path")!!
-            CoroutineScope(Dispatchers.Default).launch {
-                try {
-                    MediaStoreCompat.efficientMove(context, uri, path)
-                } catch (e: Exception) {
-                    Log.e(TAG, Log.getThrowableString(e)!!)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(
-                            context, context.getString(
-                                R.string.rename_failed_playlist, e.javaClass.name + ": " + e.message
-                            ),
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                }
-            }
-        } else {
+    /**
+     * Asks which playlist [item] goes to, or a name for a new one. Shows a progress dialog if the
+     * playlists take more than 300 ms to load.
+     */
+    fun addToPlaylist(env: AppActionEnv, item: MediaItem) {
+        val song = Entry.ofMediaItem(item)
+        if (song == null) {
             Toast.makeText(
-                context, context.getString(R.string.rename_failed_playlist, "$resultCode"),
+                env.context,
+                env.getString(R.string.edit_playlist_failed, "song == null"),
                 Toast.LENGTH_LONG
             ).show()
+            return
+        }
+        // On the application scope, like the Activity's lifecycleScope before: the chooser still
+        // shows (on root-level dialogs) if the screen that asked goes away meanwhile.
+        env.appScope.launch(Dispatchers.Default) {
+            val job = async(start = CoroutineStart.UNDISPATCHED) {
+                env.reader.playlistListFlow.first().filter { it.title != null }
+            }
+            val maybeValue = withTimeoutOrNull(300.milliseconds) {
+                job.await()
+            }
+            val playlists = maybeValue ?: run {
+                launch(Dispatchers.Main) {
+                    withContext(NonCancellable) {
+                        val progress = AppDialog.Progress(env.getString(R.string.loading_playlists))
+                        env.dialogs.show(progress)
+                        job.invokeOnCompletion {
+                            launch(Dispatchers.Main, start = CoroutineStart.ATOMIC) {
+                                withContext(NonCancellable) {
+                                    env.dialogs.dismissIf(progress)
+                                }
+                            }
+                        }
+                    }
+                }
+                job.await()
+            }
+            launch(Dispatchers.Main) {
+                val names = playlists.map {
+                    if (it is Favorite) env.getString(R.string.playlist_favourite) else
+                        it.title ?: it.path?.absolutePath ?: it.id.toString()
+                } + env.getString(R.string.create_playlist)
+                env.dialogs.show(AppDialog.Choice(
+                    title = env.getString(R.string.add_to_playlist),
+                    icon = Icons.AutoMirrored.Outlined.PlaylistPlay,
+                    items = names,
+                ) { chosen ->
+                    if (playlists.size == chosen) {
+                        playlistNameDialog(env, R.string.create_playlist, "",
+                            { ItemManipulator.getDefaultPlaylistFile(it) }) { name ->
+                            env.writes.addToPlaylist(null, name, listOf(song))
+                        }
+                        return@Choice
+                    }
+                    val pl = playlists[chosen]
+                    env.writes.addToPlaylist(
+                        ContentUris.withAppendedId(
+                            @Suppress("deprecation") MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI,
+                            pl.id!!
+                        ), null, listOf(song)
+                    )
+                })
+            }
         }
     }
 
     fun playlistNameDialog(
-        activity: MainActivity,
+        env: AppActionEnv,
         title: Int,
         initialValue: String,
         nameToFile: (String) -> File,
         then: (File) -> Unit
     ) {
-        activity.dialogs.show(AppDialog.TextInput(
-            title = activity.getString(title),
+        env.dialogs.show(AppDialog.TextInput(
+            title = env.getString(title),
             initial = initialValue,
-            hint = activity.getString(R.string.playlist_name),
+            hint = env.getString(R.string.playlist_name),
             validate = { name ->
                 val hasForbidden = name.any { it in "/\\:*?\"<>|" || it.code <= 0x1F || it.code == 0x7F }
                 when {
-                    hasForbidden -> activity.getString(R.string.forbidden_symbol_error)
+                    hasForbidden -> env.getString(R.string.forbidden_symbol_error)
                     name.isBlank() -> null
                     withContext(Dispatchers.IO) { nameToFile(name).exists() } ->
-                        activity.getString(R.string.another_with_name)
+                        env.getString(R.string.another_with_name)
                     else -> null
                 }
             },

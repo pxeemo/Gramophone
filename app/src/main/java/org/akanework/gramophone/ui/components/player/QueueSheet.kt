@@ -17,11 +17,17 @@
 package org.akanework.gramophone.ui.components.player
 
 import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -36,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -47,6 +54,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -60,7 +69,7 @@ import org.akanework.gramophone.logic.defaultPrefs
 import org.akanework.gramophone.logic.getBooleanStrict
 import org.akanework.gramophone.logic.utils.Flags
 import org.akanework.gramophone.logic.utils.convertDurationToTimeStamp
-import org.akanework.gramophone.ui.MainActivity
+import org.akanework.gramophone.ui.MediaControllerViewModel
 import org.akanework.gramophone.ui.components.compose.DismissibleRow
 import org.akanework.gramophone.ui.components.compose.rememberReorderableListState
 import org.akanework.gramophone.ui.components.compose.reorderHandle
@@ -180,7 +189,7 @@ private class QueueSheetState(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun QueueSheet(activity: MainActivity, onDismiss: () -> Unit) {
+fun QueueSheet(controller: MediaControllerViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val host = remember { QueueSheetState(context, onDismiss) }
@@ -188,10 +197,15 @@ fun QueueSheet(activity: MainActivity, onDismiss: () -> Unit) {
         host.onShow()
         onDispose { host.onHide() }
     }
-    val mqState = rememberMqState(scope, activity, host)
+    val mqState = rememberMqState(scope, controller, host)
+    if (mqState == null) {
+        // Not connected to the player: nothing to show.
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
     val mqEnabled = remember { Flags.MQ_PREVIEW && context.defaultPrefs.getBooleanStrict("mq_preview", false) }
     val pagerState = rememberPagerState(initialPage = if (Flags.MQ_PREVIEW) 0 else 1) { 2 }
-    val instance = activity.getPlayer()
+    val instance = controller.get()
 
     DisposableEffect(host, mqState) {
         val listener = object : Player.Listener {
@@ -212,7 +226,7 @@ fun QueueSheet(activity: MainActivity, onDismiss: () -> Unit) {
                 mqState.updateTimer()
             }
         }
-        activity.controllerViewModel.addRecreationalPlayerListener(host.lifecycle, listener) {
+        controller.addRecreationalPlayerListener(host.lifecycle, listener) {
             listener.onMediaItemTransition(
                 instance?.currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
             )
@@ -263,7 +277,20 @@ fun QueueSheet(activity: MainActivity, onDismiss: () -> Unit) {
         ),
         sheetMaxWidth = if (mqEnabled) WIDE_SHEET_MAX_WIDTH else BottomSheetDefaults.SheetMaxWidth,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        // Edge to edge: only keep the drag handle clear of the status bar (and the sides clear of
+        // cutouts). The songs scroll on behind the navigation bar, padded by it at the end.
+        contentWindowInsets = {
+            WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+        },
     ) {
+        // The sheet's own window enforces a navigation bar contrast scrim by default, which draws
+        // a band over the sheet with 3-button navigation. The app's window does not have one.
+        val sheetWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+        SideEffect {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                sheetWindow?.isNavigationBarContrastEnforced = false
+            }
+        }
         Column(Modifier.fillMaxWidth().fillMaxHeight()) {
             QueueRoot(
                 mqState = mqState,
@@ -280,7 +307,8 @@ fun QueueSheet(activity: MainActivity, onDismiss: () -> Unit) {
             )
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxWidth().weight(1f).navigationBarsPadding(),
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentPadding = WindowInsets.navigationBars.asPaddingValues(),
             ) {
                 itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
                     val item = row.item

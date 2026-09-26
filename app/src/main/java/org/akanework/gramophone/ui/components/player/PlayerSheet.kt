@@ -17,6 +17,7 @@
 
 package org.akanework.gramophone.ui.components.player
 
+import org.akanework.gramophone.logic.showsPause
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.runtime.Immutable
@@ -25,6 +26,7 @@ import androidx.compose.animation.animateColorAsState
 import android.net.Uri
 import android.os.Build
 import android.view.RoundedCorner
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.graphics.ExperimentalAnimationGraphicsApi
@@ -62,8 +64,12 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,13 +90,15 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
+import coil3.request.error
 import coil3.size.Precision
 import com.materialkolor.ktx.animateColorScheme
-import com.materialkolor.ktx.harmonize
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import org.akanework.gramophone.R
 import org.akanework.gramophone.ui.components.compose.rememberBooleanPreference
 import org.akanework.gramophone.ui.components.compose.rememberIntPreference
+import org.akanework.gramophone.ui.components.home.rememberDefaultCoverPainter
 import org.akanework.gramophone.ui.components.lyrics.LyricsOverlayState
 import org.akanework.gramophone.ui.components.player.PlayerUtilities.COVER_CLICK_MIN
 import org.akanework.gramophone.ui.components.player.PlayerUtilities.FALLBACK_PAGE_CORNER
@@ -121,6 +129,8 @@ data class SheetChrome(
 class PlayerSheetPlayerState {
     val hasMedia = MutableStateFlow(false)
     val isPlaying = MutableStateFlow(false)
+    /** What the play/pause buttons show, see [showsPause]. */
+    val showPause = MutableStateFlow(false)
     val title: MutableStateFlow<CharSequence?> = MutableStateFlow(null)
     val artist: MutableStateFlow<CharSequence?> = MutableStateFlow(null)
     val artworkUri: MutableStateFlow<Uri?> = MutableStateFlow(null)
@@ -166,13 +176,18 @@ fun PlayerSheet(
     state: NowPlayingSheetState,
     player: PlayerSheetPlayerState,
     chrome: State<SheetChrome>,
-    /** Color the current page wants the bar harmonized to, or null for the app's primary. */
-    pageAccent: () -> Color?,
+    /** Whether the current page is themed from a cover, where the bar isn't harmonized. */
+    pageTinted: () -> Boolean,
     lyrics: LyricsOverlayState,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
     onCoverClick: () -> Unit,
     onExpandedTargetChanged: (Boolean) -> Unit,
+    /**
+     * Receives a draw-phase check of whether the sheet covers the whole screen (fully expanded
+     * and slid in), so the host can skip drawing the pages under it.
+     */
+    onCoversScreen: (() -> Boolean) -> Unit,
     actions: FullPlayerActions,
     dialogCallbacks: PlayerDialogCallbacks,
 ) {
@@ -194,29 +209,40 @@ fun PlayerSheet(
     // Slide the whole sheet down by its collapsed height when there is nothing to show. Uses the
     // page transition's duration and easing, so the bar does not disappear faster than the page
     // when entering or leaving settings.
-    val showFraction by animateFloatAsState(
+    val showFraction = animateFloatAsState(
         targetValue = if (c.shown && hasMedia) 1f else 0f,
         animationSpec = tween(NAV_TRANSITION_MS, easing = NavAxisEasing),
         label = "sheet show",
     )
+    // The expanded sheet's surface is opaque and square-cornered at full progress. Read in the
+    // draw phase: the frame the sheet starts to move (drag, back gesture, collapse) draws what's
+    // under it again.
+    val coversScreen = remember(state, showFraction) {
+        { state.progress >= 1f && showFraction.value >= 1f }
+    }
+    SideEffect { onCoversScreen(coversScreen) }
 
-    // Accent the bar is harmonized to: the current page's cover color, or the app primary.
-    // Animated with the page transition. Only read in the draw phase and in the mini bar
-    // content, so the animation does not recompose the sheet on every frame.
-    val accent = animateColorAsState(
-        pageAccent() ?: MaterialTheme.colorScheme.primary,
+    // How far the bar leans towards the app's hue: fully, except on a page themed from a cover,
+    // which shows the cover's own colours. Animated with the page transition. Only read in the
+    // draw phase and in the mini bar content, so the animation does not recompose the sheet on
+    // every frame.
+    val harmony = animateFloatAsState(
+        if (pageTinted()) 0f else 1f,
         tween(NAV_TRANSITION_MS, easing = NavAxisEasing),
-        label = "page accent",
+        label = "page harmony",
     )
+    val appPrimary = rememberUpdatedState(MaterialTheme.colorScheme.primary)
     val barColors = remember(coverScheme) {
-        derivedStateOf { nowPlayingColors(coverScheme, accent.value) }
+        derivedStateOf { nowPlayingColors(coverScheme, appPrimary.value, harmony.value) }
     }
     val miniColors = remember(coverScheme) {
         derivedStateOf {
+            val primary = appPrimary.value
+            val f = harmony.value
             MiniBarColors(
-                content = coverScheme.onSurface.harmonize(accent.value),
-                playButton = coverScheme.secondaryContainer.harmonize(accent.value),
-                onPlayButton = coverScheme.onSecondaryContainer.harmonize(accent.value),
+                content = coverScheme.onSurface.harmonizeBy(primary, f),
+                playButton = coverScheme.secondaryContainer.harmonizeBy(primary, f),
+                onPlayButton = coverScheme.onSecondaryContainer.harmonizeBy(primary, f),
             )
         }
     }
@@ -239,21 +265,23 @@ fun PlayerSheet(
         )
         state.travelPx = metrics.travelPx
 
-        // Scrim behind the sheet (only meaningful mid/late morph; fully covered at progress = 1).
+        // Scrim behind the sheet (only meaningful mid/late morph; fully covered at progress = 1,
+        // where it isn't drawn).
+        val scrimAlpha = (metrics.eased * SCRIM_MAX_ALPHA).coerceIn(0f, 1f)
         Box(
             Modifier
                 .fillMaxSize()
-                .alpha((metrics.eased * SCRIM_MAX_ALPHA).coerceIn(0f, 1f))
-                .background(Color.Black),
+                .drawBehind { if (scrimAlpha > 0f && !coversScreen()) drawRect(Color.Black, alpha = scrimAlpha) },
         )
 
         Box(
             Modifier
                 .fillMaxSize()
                 // Slide the whole floating sheet fully below the screen when there's nothing to show.
-                .graphicsLayer { translationY = (1f - showFraction) * metrics.collapsedFootprint },
+                .graphicsLayer { translationY = (1f - showFraction.value) * metrics.collapsedFootprint },
         ) {
-            SheetSurface(metrics) { barColors.value.bar }
+            // Under the lyrics while they cover the whole screen, the surface isn't drawn
+            SheetSurface(metrics, hidden = { coversScreen() && lyrics.covering }) { barColors.value.bar }
             ProgressFill(player, metrics) { barColors.value.fill }
             FullPlayerContent(
                 state, metrics, player, actions, coverScheme, lyrics,
@@ -276,13 +304,14 @@ private data class MiniBarColors(val content: Color, val playButton: Color, val 
 
 /** Sheet background: [collapsedColor] when collapsed, the surface color when expanded. */
 @Composable
-private fun SheetSurface(metrics: PlayerSheetMetrics, collapsedColor: () -> Color) {
+private fun SheetSurface(metrics: PlayerSheetMetrics, hidden: () -> Boolean, collapsedColor: () -> Color) {
     val expanded = MaterialTheme.colorScheme.surface
     Box(
         Modifier
             .absolute(metrics.sheetLeft, metrics.sheetTop, metrics.sheetWidth, metrics.sheetHeight)
             .clip(RoundedCornerShape(metrics.cornerDp))
             .drawBehind {
+                if (hidden()) return@drawBehind
                 drawRect(lerp(collapsedColor(), expanded, metrics.eased.coerceIn(0f, 1f)))
             },
     )
@@ -345,7 +374,7 @@ private fun SheetInteraction(
             val (contentColor, playButtonContainer, playButtonContent) = colors()
             val title by player.title.collectAsState()
             val artist by player.artist.collectAsState()
-            val isPlaying by player.isPlaying.collectAsState()
+            val showPause by player.showPause.collectAsState()
 
             // Leave room for the cover slot
             val startPadding = with(density) {
@@ -389,7 +418,7 @@ private fun SheetInteraction(
                         contentColor = playButtonContent,
                     ),
                 ) {
-                    PlayPauseIcon(playing = isPlaying, tint = playButtonContent, modifier = Modifier.size(MINI_ICON_SIZE))
+                    PlayPauseIcon(playing = showPause, tint = playButtonContent, modifier = Modifier.size(MINI_ICON_SIZE))
                 }
                 IconButton(onClick = onNext, modifier = Modifier.size(MINI_BUTTON_SIZE)) {
                     Icon(
@@ -432,10 +461,10 @@ private fun SharedArtwork(
     val shape = if (cookie) CookieMorphShape(metrics.eased) else RoundedCornerShape(metrics.artCornerDp)
     val context = LocalPlatformContext.current
     val requestSizePx = metrics.rootWidth.roundToInt().coerceAtLeast(1)
-    val model: Any = artwork ?: R.drawable.ic_default_cover
-    val request = remember(model, requestSizePx) {
+    // No artwork loads as a null request, which shows the default cover through the fallback.
+    val request = remember(artwork, requestSizePx) {
         ImageRequest.Builder(context)
-            .data(model)
+            .data(artwork)
             .size(requestSizePx)
             .precision(Precision.INEXACT)
             .build()
@@ -458,10 +487,8 @@ private fun SharedArtwork(
             .absolute(metrics.sheetLeft, metrics.sheetTop, metrics.sheetWidth, metrics.sheetHeight)
             .clip(RoundedCornerShape(metrics.cornerDp)),
     ) {
-        AsyncImage(
-            model = request,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+        CrossfadeArtwork(
+            request = request,
             modifier = Modifier
                 .absolute(
                     metrics.artLeftRoot - metrics.sheetLeft,
@@ -474,6 +501,57 @@ private fun SharedArtwork(
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                 .then(gestures),
         )
+    }
+}
+
+/** How long a new cover takes to fade in over the previous one. */
+private const val ART_CROSSFADE_MS = 300
+
+/** One cover in [CrossfadeArtwork]'s stack. */
+private class ArtworkLayer(val request: ImageRequest, initialAlpha: Float) {
+    val alpha = Animatable(initialAlpha)
+}
+
+/**
+ * The cover, which keeps showing the previous song's cover until the new one has loaded (like the
+ * View player's loadNoPlaceholder) and then fades the new one in over it.
+ */
+@Composable
+private fun CrossfadeArtwork(request: ImageRequest, modifier: Modifier) {
+    val scope = rememberCoroutineScope()
+    // Drawn with its glyph at the shared share, like every other default cover.
+    val defaultCover = rememberDefaultCoverPainter(R.drawable.ic_default_cover)
+    val layers = remember { mutableStateListOf<ArtworkLayer>() }
+    if (layers.lastOrNull()?.request != request) {
+        // The very first cover shows as soon as it loads, later ones fade in over the last.
+        layers += ArtworkLayer(request, initialAlpha = if (layers.isEmpty()) 1f else 0f)
+    }
+    Box(modifier) {
+        for (layer in layers) {
+            key(layer) {
+                val onLoaded = {
+                    scope.launch {
+                        layer.alpha.animateTo(1f, tween(ART_CROSSFADE_MS))
+                        // Now opaque: drop the covers under it.
+                        val index = layers.indexOf(layer)
+                        if (index > 0) layers.removeRange(0, index)
+                    }
+                    Unit
+                }
+                AsyncImage(
+                    model = layer.request,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    error = defaultCover,
+                    fallback = defaultCover,
+                    onSuccess = { onLoaded() },
+                    onError = { onLoaded() },
+                    modifier = Modifier
+                        .matchParentSize()
+                        .graphicsLayer { alpha = layer.alpha.value },
+                )
+            }
+        }
     }
 }
 

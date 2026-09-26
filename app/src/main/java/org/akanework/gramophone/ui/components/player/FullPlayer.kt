@@ -17,12 +17,12 @@
 
 package org.akanework.gramophone.ui.components.player
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.graphics.ExperimentalAnimationGraphicsApi
-import androidx.compose.animation.graphics.res.animatedVectorResource
-import androidx.compose.animation.graphics.res.rememberAnimatedVectorPainter
-import androidx.compose.animation.graphics.vector.AnimatedImageVector
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -44,6 +45,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,31 +64,43 @@ import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.akanework.gramophone.R
 import org.akanework.gramophone.logic.utils.CalculationUtils
 import org.akanework.gramophone.ui.components.lyrics.LyricsOverlay
 import org.akanework.gramophone.ui.components.lyrics.LyricsOverlayState
@@ -188,19 +202,22 @@ private fun FullPlayerScaffold(
         ) {
             TopButtonRow(player, actions, scheme, onOpenDialog)
             Spacer(Modifier.height(16.dp))
+            // The cover's slot. Its size already leaves the controls below their natural height
+            // (see playerSheetMetrics), so they sit centered in what is left.
             Spacer(Modifier.height(coverDp))
-            Column(
+            Box(
                 Modifier
                     .weight(1f)
-                    .fillMaxWidth()
-                    .heightIn(min = 250.dp),
-                verticalArrangement = Arrangement.Center,
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center,
             ) {
-                TitleArtist(player, actions, scheme, PORTRAIT_MARGIN)
-                Spacer(Modifier.height(12.dp))
-                ProgressSection(player, actions, scheme, PORTRAIT_MARGIN)
-                Spacer(Modifier.height(18.dp))
-                TransportRow(player, actions, scheme)
+                Column(Modifier.fillMaxWidth()) {
+                    TitleArtist(player, actions, scheme, PORTRAIT_MARGIN)
+                    Spacer(Modifier.height(12.dp))
+                    ProgressSection(player, actions, scheme, PORTRAIT_MARGIN)
+                    Spacer(Modifier.height(18.dp))
+                    TransportRow(player, actions, scheme)
+                }
             }
             ActionBarRow(player, actions, scheme)
         }
@@ -320,7 +337,12 @@ private fun IconSlot(image: ImageVector, tint: Color, box: Dp, icon: Dp, onClick
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+/** How long the title and artist take to fade out, and then in, when the song changes. */
+private const val TEXT_FADE_MS = 300
+
+/** How far in from each end the scrolling title and artist fade out. */
+private val MARQUEE_FADE_EDGE = 16.dp
+
 @Composable
 private fun TitleArtist(
     player: PlayerSheetPlayerState,
@@ -339,35 +361,104 @@ private fun TitleArtist(
             .padding(horizontal = horizontalMargin),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
+        FadingMarqueeText(
             text = title?.toString().orEmpty(),
             color = scheme.primary,
             fontSize = 24.sp,
+            lineHeight = 32.sp,
             fontWeight = if (bold) FontWeight.W600 else FontWeight.W400,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = align,
-            modifier = Modifier
-                .fillMaxWidth()
-                .basicMarquee()
-                .noRippleClickable(actions.openAlbum),
+            align = align,
+            onClick = actions.openAlbum,
         )
         Spacer(Modifier.height(3.dp))
-        Text(
+        FadingMarqueeText(
             text = artist?.toString().orEmpty(),
             color = scheme.secondary,
             fontSize = 19.sp,
+            lineHeight = 25.sp,
             fontWeight = FontWeight.W500,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = align,
-            modifier = Modifier
-                .fillMaxWidth()
-                .basicMarquee()
-                .noRippleClickable(actions.openArtist),
+            align = align,
+            onClick = actions.openArtist,
         )
     }
 }
+
+/**
+ * A single scrolling line, which fades out and the new text in when it changes (like the View
+ * player's setTextAnimation) and fades its ends while the text is too long to fit.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FadingMarqueeText(
+    text: String,
+    color: Color,
+    fontSize: TextUnit,
+    // A fixed line height, so a title falling back to a taller font (CJK after Latin, say) keeps
+    // the same height and the controls below don't jump when the song changes.
+    lineHeight: TextUnit,
+    fontWeight: FontWeight,
+    align: TextAlign,
+    onClick: () -> Unit,
+) {
+    AnimatedContent(
+        targetState = text,
+        modifier = Modifier.fillMaxWidth(),
+        transitionSpec = {
+            (fadeIn(tween(TEXT_FADE_MS, delayMillis = TEXT_FADE_MS)) togetherWith fadeOut(tween(TEXT_FADE_MS)))
+                .using(null)
+        },
+        label = "player text fade",
+    ) { shown ->
+        // Width of the laid out line: wider than the slot only when it overflows and scrolls
+        var lineWidth by remember { mutableIntStateOf(0) }
+        Text(
+            text = shown,
+            color = color,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = align,
+            style = LocalTextStyle.current.copy(
+                lineHeight = lineHeight,
+                lineHeightStyle = LineHeightStyle(
+                    LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None,
+                ),
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+            ),
+            onTextLayout = { lineWidth = it.size.width },
+            modifier = Modifier
+                .fillMaxWidth()
+                .marqueeFadingEdges { lineWidth }
+                .basicMarquee(iterations = Int.MAX_VALUE)
+                .noRippleClickable(onClick),
+        )
+    }
+}
+
+/** Fades both ends of a [basicMarquee] line out while its text ([lineWidth]) overflows. */
+private fun Modifier.marqueeFadingEdges(lineWidth: () -> Int): Modifier =
+    graphicsLayer {
+        compositingStrategy =
+            if (lineWidth() > size.width) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+    }.drawWithContent {
+        drawContent()
+        if (lineWidth() <= size.width) return@drawWithContent
+        val edge = MARQUEE_FADE_EDGE.toPx().coerceAtMost(size.width / 2f)
+        drawRect(
+            brush = Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = 0f, endX = edge),
+            size = Size(edge, size.height),
+            blendMode = BlendMode.DstIn,
+        )
+        drawRect(
+            brush = Brush.horizontalGradient(
+                listOf(Color.Black, Color.Transparent), startX = size.width - edge, endX = size.width,
+            ),
+            topLeft = Offset(size.width - edge, 0f),
+            size = Size(edge, size.height),
+            blendMode = BlendMode.DstIn,
+        )
+    }
 
 @Composable
 private fun ProgressSection(
@@ -419,7 +510,7 @@ private fun ProgressSection(
             onSeek = {
                 actions.seekTo((it * duration).toLong())
                 scrub = null
-            },
+            },            onScrubCancel = { scrub = null },
         )
     }
     Row(
@@ -465,10 +556,16 @@ private fun ProgressSection(
     }
 }
 
-@OptIn(ExperimentalAnimationGraphicsApi::class)
+/** How far the play button's backdrop turns as it blooms into the cookie. */
+private const val PLAY_MORPH_ROTATION = 30f
+
+/** The expressive scheme's quick, slightly bouncy spring, for the play button's morph. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val PLAY_MORPH_SPEC = MotionScheme.expressive().fastSpatialSpec<Float>()
+
 @Composable
 private fun TransportRow(player: PlayerSheetPlayerState, actions: FullPlayerActions, scheme: ColorScheme) {
-    val isPlaying by player.isPlaying.collectAsState()
+    val showPause by player.showPause.collectAsState()
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
@@ -479,21 +576,24 @@ private fun TransportRow(player: PlayerSheetPlayerState, actions: FullPlayerActi
             onClick = actions.previous, onLongClick = actions.seekBack,
         )
         Spacer(Modifier.width(8.dp))
-        val bg = AnimatedImageVector.animatedVectorResource(R.drawable.bg_play_anim)
-        val bgPainter = rememberAnimatedVectorPainter(bg, atEnd = isPlaying)
+        val morph by animateFloatAsState(
+            targetValue = if (showPause) 1f else 0f,
+            animationSpec = PLAY_MORPH_SPEC,
+            label = "play button morph",
+        )
         Box(
             Modifier
-                .size(90.dp)
+                .transportSlot()
                 .noRippleClickable(actions.playPause),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                painter = bgPainter,
-                contentDescription = null,
-                tint = scheme.secondaryContainer,
-                modifier = Modifier.size(90.dp),
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .graphicsLayer { rotationZ = PLAY_MORPH_ROTATION * morph }
+                    .background(scheme.secondaryContainer, PlayButtonMorphShape(morph)),
             )
-            PlayPauseIcon(playing = isPlaying, tint = scheme.onSecondaryContainer, modifier = Modifier.size(42.dp))
+            PlayPauseIcon(playing = showPause, tint = scheme.onSecondaryContainer, modifier = Modifier.size(42.dp))
         }
         Spacer(Modifier.width(8.dp))
         TransportButton(
@@ -502,6 +602,10 @@ private fun TransportRow(player: PlayerSheetPlayerState, actions: FullPlayerActi
         )
     }
 }
+
+/** A 90dp square transport button that shrinks as a square, never squashed, if it has to. */
+private fun Modifier.transportSlot(): Modifier =
+    sizeIn(maxWidth = 90.dp, maxHeight = 90.dp).aspectRatio(1f, matchHeightConstraintsFirst = true)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -514,7 +618,7 @@ private fun TransportButton(
 ) {
     Box(
         Modifier
-            .size(90.dp)
+            .transportSlot()
             .clip(CircleShape)
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },

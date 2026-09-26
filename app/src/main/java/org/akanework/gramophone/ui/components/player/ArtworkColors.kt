@@ -28,8 +28,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import coil3.BitmapImage
 import coil3.PlatformContext
@@ -44,7 +46,13 @@ import com.materialkolor.ktx.quantize
 import com.materialkolor.quantize.QuantizerCelebi
 import com.materialkolor.rememberDynamicColorScheme
 import com.materialkolor.score.Score
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import org.akanework.gramophone.logic.ApplicationScope
+import org.koin.compose.koinInject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.withContext
 import org.akanework.gramophone.ui.components.compose.rememberBooleanPreference
 import org.akanework.gramophone.ui.components.player.PlayerUtilities.ARTWORK_QUANTIZE_MAX
@@ -97,40 +105,97 @@ private const val DARK_BAR_FILL_CHROMA = 32.0
 private const val DARK_BAR_FILL_TONE = 35.0
 private const val ON_FILL_VARIANT_ALPHA = 0.8f
 
-fun nowPlayingColors(cover: ColorScheme, appPrimary: Color): NowPlayingColors {
+/**
+ * [harmony] is how far the colours lean towards [appPrimary], from 0 (the cover's own, on a page
+ * already themed from a cover) to 1 (fully harmonized, among the app's own surfaces).
+ */
+fun nowPlayingColors(cover: ColorScheme, appPrimary: Color, harmony: Float = 1f): NowPlayingColors {
     val isDark = cover.surface.luminance() < 0.5f
-    val primary = cover.primary.harmonize(appPrimary)
-    val onFill = cover.onPrimaryContainer.harmonize(appPrimary)
+    val primary = cover.primary.harmonizeBy(appPrimary, harmony)
+    val onFill = cover.onPrimaryContainer.harmonizeBy(appPrimary, harmony)
     return NowPlayingColors(
         bar = if (isDark) primary.tonal(DARK_BAR_CHROMA, DARK_BAR_TONE)
-            else cover.surface.harmonize(appPrimary),
+            else cover.surface.harmonizeBy(appPrimary, harmony),
         fill = if (isDark) primary.tonal(DARK_BAR_FILL_CHROMA, DARK_BAR_FILL_TONE)
-            else cover.primaryContainer.harmonize(appPrimary),
+            else cover.primaryContainer.harmonizeBy(appPrimary, harmony),
         onFill = onFill,
         onFillVariant = onFill.copy(alpha = ON_FILL_VARIANT_ALPHA),
     )
 }
 
+/** This colour leant towards [target] by [fraction]: unchanged at 0, harmonized at 1. */
+fun Color.harmonizeBy(target: Color, fraction: Float): Color = when {
+    fraction <= 0f -> this
+    fraction >= 1f -> harmonize(target)
+    else -> lerp(this, harmonize(target), fraction)
+}
+
+/**
+ * Whether cover colours shown here lean towards the theme's hue. Off on a page already themed
+ * from a cover, where they are shown as they are.
+ */
+val LocalHarmonizeCovers = staticCompositionLocalOf { true }
+
 /** Seeds by cover, one cache per accuracy since the two decodes can score differently. */
 private val artworkSeedCache = LruCache<Uri, Color>(64)
 private val accurateArtworkSeedCache = LruCache<Uri, Color>(64)
 
+/**
+ * Seed extractions still running, so the list row, player and queue asking for the same cover at
+ * once share one decode. Only touched on the main thread.
+ */
+private val inFlightSeeds = HashMap<Pair<Uri, Boolean>, Deferred<Color?>>()
+
+/**
+ * The cache key for a cover: its URI without the `hd` flag. The seed comes from a tiny decode,
+ * so the full and HD artwork give the same colour, and the player's switch from one to the other
+ * mid-song must not start a second extraction.
+ */
+internal fun seedKey(uri: Uri): Uri {
+    if (uri.getQueryParameter("hd") == null) return uri
+    return uri.buildUpon().clearQuery().apply {
+        for (name in uri.queryParameterNames) {
+            if (name == "hd") continue
+            for (value in uri.getQueryParameters(name)) appendQueryParameter(name, value)
+        }
+    }.build()
+}
+
 @Composable
 private fun rememberArtworkSeed(artworkUri: Uri?, accurate: Boolean): Color? {
     val context = LocalPlatformContext.current
+    val appScope = koinInject<ApplicationScope>()
     val cache = if (accurate) accurateArtworkSeedCache else artworkSeedCache
-    var seed by remember { mutableStateOf(artworkUri?.let { cache[it] }) }
-    LaunchedEffect(artworkUri, accurate) {
-        if (artworkUri == null) {
+    val key = artworkUri?.let(::seedKey)
+    var seed by remember { mutableStateOf(key?.let { cache[it] }) }
+    LaunchedEffect(key, accurate) {
+        if (artworkUri == null || key == null) {
             seed = null
             return@LaunchedEffect
         }
-        cache[artworkUri]?.let {
+        cache[key]?.let {
             seed = it
             return@LaunchedEffect
         }
-        seed = runCatching { extractArtworkSeed(context, artworkUri, accurate) }.getOrNull()
-            ?.also { cache.put(artworkUri, it) }
+        // The decode runs on the app scope, not this effect: a superseded or disposed caller
+        // only stops waiting, while the shared result still lands in the cache for the others.
+        val flight = key to accurate
+        val job = inFlightSeeds.getOrPut(flight) {
+            val appContext = context.applicationContext
+            appScope.async {
+                try {
+                    extractArtworkSeed(appContext, artworkUri, accurate)
+                        ?.also { cache.put(key, it) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    withContext(NonCancellable + Dispatchers.Main) { inFlightSeeds.remove(flight) }
+                }
+            }
+        }
+        seed = job.await()
     }
     return seed
 }

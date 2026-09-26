@@ -1,5 +1,6 @@
 package org.akanework.gramophone.ui.fragments.compose
 
+import org.akanework.gramophone.logic.showsPause
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -72,6 +73,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.Player.REPEAT_MODE_ALL
 import androidx.media3.common.Player.REPEAT_MODE_OFF
 import androidx.media3.common.Player.REPEAT_MODE_ONE
+import androidx.media3.session.MediaBrowser
 import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
@@ -95,7 +97,7 @@ import org.akanework.gramophone.logic.supportsWideScreen
 import org.akanework.gramophone.logic.unpinQueue
 import org.akanework.gramophone.logic.utils.CalculationUtils.convertDurationToTimeStamp
 import org.akanework.gramophone.logic.utils.Flags
-import org.akanework.gramophone.ui.MainActivity
+import org.akanework.gramophone.ui.MediaControllerViewModel
 import org.akanework.gramophone.ui.components.compose.QueueDropdownMenu
 import org.akanework.gramophone.ui.components.player.QueueSheetHost
 import org.akanework.gramophone.ui.components.player.QueueTimer
@@ -477,7 +479,7 @@ fun ActionBar(
     mqState: MqState,
     modifier: Modifier = Modifier
 ) {
-    val isPlaying by mqState.isPlaying.collectAsState()
+    val showPause by mqState.showPause.collectAsState()
     val repeatMode by mqState.repeatMode.collectAsState()
     val shuffleModeEnabled by mqState.shuffleModeEnabled.collectAsState()
 
@@ -555,7 +557,7 @@ fun ActionBar(
                 enabled = !mqState.isDetached(),
             ) {
                 Icon(
-                    painter = painterResource(if (isPlaying) R.drawable.ic_pause_filled else R.drawable.ic_play_arrow),
+                    painter = painterResource(if (showPause) R.drawable.ic_pause_filled else R.drawable.ic_play_arrow),
                     contentDescription = null,
                 )
             }
@@ -798,7 +800,9 @@ fun QueueRoot(
  */
 class MqState(
     private val coroutineScope: CoroutineScope,
-    private val activity: MainActivity,
+    private val controller: MediaControllerViewModel,
+    /** The connected controller the queue is opened for, see [rememberMqState]. */
+    private val instance: MediaBrowser,
     private val host: QueueSheetHost,
 ) {
 
@@ -830,8 +834,8 @@ class MqState(
         }
     }
 
-    private val instance = activity.getPlayer()!!
     val isPlaying = MutableStateFlow(instance.isPlaying)
+    val showPause = MutableStateFlow(instance.showsPause)
 
     // shuffle and repeat modes do not need to be manually set for queue loads, they will be set automatically
     val shuffleModeEnabled = MutableStateFlow(instance.shuffleModeEnabled)
@@ -868,6 +872,14 @@ class MqState(
             this@MqState.isPlaying.value = isPlaying
         }
 
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            showPause.value = instance.showsPause
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            showPause.value = instance.showsPause
+        }
+
         override fun onRepeatModeChanged(repeatMode: @Player.RepeatMode Int) {
             this@MqState.repeatMode.value = repeatMode
         }
@@ -887,13 +899,13 @@ class MqState(
     }
 
     init {
-        activity.controllerViewModel.addRecreationalPlayerListener(
+        controller.addRecreationalPlayerListener(
             host.lifecycle,
             playerListener
         ) {
         }
 
-        activity.controllerViewModel.customCommandListeners.addCallback(host.lifecycle) { _, command, _ ->
+        controller.customCommandListeners.addCallback(host.lifecycle) { _, command, _ ->
             when (command.customAction) {
                 CLIENT_QB_REFRESH_ALL, CLIENT_QB_REFRESH_QUEUES, CLIENT_QB_REFRESH_ITEM, CLIENT_QB_REFRESH_LIST, CLIENT_QB_REFRESH_CLEAR -> {
                     SessionResult(SessionResult.RESULT_SUCCESS).also { res ->
@@ -1185,7 +1197,7 @@ class MqState(
     /** Row [from] of the queue dragged to [to]. */
     fun moveRow(from: Int, to: Int) {
         if (from == to) return
-        val mediaController = activity.getPlayer()
+        val mediaController = controller.get()
         val from1 = playlist.first.removeAt(from)
         playlist.first.replaceAllSupport { if (it > from1) it - 1 else it }
         val movedItem = playlist.second.removeAt(from1)
@@ -1359,7 +1371,8 @@ class MqState(
 
     private fun dumpPlaylist(): Pair<MutableList<Int>, MutableList<MediaItem>> {
         val items = LinkedList<MediaItem>()
-        val instance = activity.getPlayer()!!
+        // Skipped when the controller is not connected (anymore)
+        val instance = controller.get() ?: return Pair(LinkedList(), items)
         for (i in 0 until instance.mediaItemCount) {
             items.add(instance.getMediaItemAt(i))
         }
@@ -1378,13 +1391,14 @@ class MqState(
     }
 }
 
+/** The queue's state, or null while the controller is not connected (the queue can't be shown). */
 @Composable
 fun rememberMqState(
     coroutineScope: CoroutineScope,
-    instance: MainActivity,
+    controller: MediaControllerViewModel,
     host: QueueSheetHost,
-): MqState {
+): MqState? {
     return remember {
-        MqState(coroutineScope, instance, host)
+        controller.get()?.let { MqState(coroutineScope, controller, it, host) }
     } // TODO: rememberSaveable
 }
