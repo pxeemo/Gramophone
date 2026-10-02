@@ -1,7 +1,6 @@
 package org.akanework.gramophone.ui.nav
 
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.snapshots.SnapshotStateMap
+import android.os.Parcelable
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -19,10 +18,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,17 +33,21 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import kotlinx.parcelize.IgnoredOnParcel
+import kotlinx.parcelize.Parcelize
 import org.akanework.gramophone.ui.components.compose.AppDialogHost
 import org.akanework.gramophone.ui.components.compose.AppDialogHostState
 import org.akanework.gramophone.ui.components.compose.LocalAppDialogs
 import org.akanework.gramophone.ui.components.player.LocalPlayerSheet
 import org.akanework.gramophone.ui.components.player.PlayerSheetController
+import org.akanework.gramophone.ui.components.player.PlayerSheetHost
 import org.akanework.gramophone.ui.screens.HomeScreen
 import org.akanework.gramophone.ui.screens.LibrarySubScreen
 import org.akanework.gramophone.ui.screens.PlaylistEditScreen
@@ -68,22 +72,30 @@ sealed interface AppNavKey : NavKey {
     val wantsPlayer: Boolean
 }
 
-data object HomeKey : AppNavKey {
+@Parcelize
+data object HomeKey : AppNavKey, Parcelable {
+    @IgnoredOnParcel
     override val wantsPlayer = true
 }
 
 /** The search page, opened with [query] typed in already when it comes from an intent. */
-class SearchKey(val query: String?) : AppNavKey {
+@Parcelize
+data class SearchKey(val query: String?) : AppNavKey, Parcelable {
+    @IgnoredOnParcel
     override val wantsPlayer = true
 }
 
 /** The details of one song. */
-class SongDetailKey(val mediaId: String) : AppNavKey {
+@Parcelize
+data class SongDetailKey(val mediaId: String) : AppNavKey, Parcelable {
+    @IgnoredOnParcel
     override val wantsPlayer = false
 }
 
 /** Editing the playlist with MediaStore id [id]. */
-class PlaylistEditKey(val id: Long) : AppNavKey {
+@Parcelize
+data class PlaylistEditKey(val id: Long) : AppNavKey, Parcelable {
+    @IgnoredOnParcel
     override val wantsPlayer = false
 }
 
@@ -92,26 +104,56 @@ sealed interface LibrarySubKey : AppNavKey {
     override val wantsPlayer: Boolean get() = true
 }
 
-class AlbumKey(val id: Long?) : LibrarySubKey
-class GenreKey(val id: Long?) : LibrarySubKey
-class DateKey(val id: Long?) : LibrarySubKey
-class PlaylistKey(val id: Long?, val className: String?) : LibrarySubKey
-class ArtistKey(val id: Long?, val albumArtist: Boolean) : LibrarySubKey
+@Parcelize
+data class AlbumKey(val id: Long?) : LibrarySubKey, Parcelable
 
-class NavViewModel : ViewModel() {
-    val backStack: SnapshotStateList<AppNavKey> = mutableStateListOf(HomeKey)
+@Parcelize
+data class GenreKey(val id: Long?) : LibrarySubKey, Parcelable
+
+@Parcelize
+data class DateKey(val id: Long?) : LibrarySubKey, Parcelable
+
+@Parcelize
+data class PlaylistKey(val id: Long?, val className: String?) : LibrarySubKey, Parcelable
+
+@Parcelize
+data class ArtistKey(val id: Long?, val albumArtist: Boolean) : LibrarySubKey, Parcelable
+
+/**
+ * The activity's pages and their cover color schemes. The pages survive process death too, kept
+ * in [handle]; the schemes don't, and each page sets its own again when it comes back.
+ */
+class NavViewModel(handle: SavedStateHandle) : ViewModel() {
+    private val _backStack: SnapshotStateList<AppNavKey> =
+        handle.get<SnapshotStateList<AppNavKey>>("backStack")?.takeIf { it.isNotEmpty() }
+            ?: mutableStateListOf<AppNavKey>(HomeKey).also { handle["backStack"] = it }
+    private val _pageSchemes = mutableStateMapOf<AppNavKey, ColorScheme>()
+
+    /** The open pages, [HomeKey] first and the top page last. Never empty. */
+    val backStack: List<AppNavKey> get() = _backStack
 
     /**
-     * Color scheme per back stack entry that is themed from a cover. The dialogs take the top
-     * page's, and the mini player stops harmonizing to the app's hue on top of one.
+     * Color scheme per back stack entry that is themed from a cover, set with [setPageScheme].
+     * The dialogs take the top page's, and the mini player stops harmonizing to the app's hue on
+     * top of one.
      */
-    val pageSchemes: SnapshotStateMap<AppNavKey, ColorScheme> = mutableStateMapOf()
+    val pageSchemes: Map<AppNavKey, ColorScheme> get() = _pageSchemes
 
     /** Scheme of the top page, or null if it uses the app colors. */
-    val topScheme: ColorScheme? get() = backStack.lastOrNull()?.let { pageSchemes[it] }
+    val topScheme: ColorScheme? get() = backStack.lastOrNull()?.let { _pageSchemes[it] }
 
     fun navigateTo(key: AppNavKey) {
-        backStack.add(key)
+        _backStack.add(key)
+    }
+
+    /** Closes the top page. The home is never closed. */
+    fun pop() {
+        if (_backStack.size > 1) _backStack.removeAt(_backStack.lastIndex)
+    }
+
+    /** Themes the page [key] with [scheme], or with the app colors again if null. */
+    fun setPageScheme(key: AppNavKey, scheme: ColorScheme?) {
+        if (scheme != null) _pageSchemes[key] = scheme else _pageSchemes.remove(key)
     }
 }
 
@@ -127,6 +169,12 @@ val LocalAppBarTopPadding = compositionLocalOf { 0.dp }
  */
 val LocalListBottomPadding = compositionLocalOf<Dp?> { null }
 
+/**
+ * Whether a list keeps clear of the system bars and cutouts at its sides. The home's sheet keeps
+ * clear of them itself, with its corners, so its lists don't.
+ */
+val LocalListSideInsets = compositionLocalOf { true }
+
 /** True while a page covers the always-composed home (so it can pause its animations). */
 val LocalHomeCovered = compositionLocalOf { false }
 
@@ -136,18 +184,17 @@ val LocalReportFullyDrawn = staticCompositionLocalOf<() -> Unit> { {} }
 private val HOME_CONTENT_KEY: Any = NavEntry<AppNavKey>(HomeKey, content = {}).contentKey
 
 /**
- * The pages, the dialogs and snackbar, and above them all the player sheet. Provides [dialogs]
- * and [playerSheet] to the pages.
+ * The pages of the activity's [NavViewModel], the dialogs and snackbar, and above them all the
+ * player sheet. Provides [dialogs] and [playerSheet] to the pages.
  */
 @Composable
 fun AppRoot(
-    backStack: SnapshotStateList<AppNavKey>,
     playerSheet: PlayerSheetController,
     dialogs: AppDialogHostState,
     debug: Boolean,
 ) {
-    val top = backStack.lastOrNull()
     val navViewModel = koinActivityViewModel<NavViewModel>()
+    val top = navViewModel.backStack.lastOrNull()
     LaunchedEffect(top) {
         top?.let { playerSheet.visible = it.wantsPlayer }
     }
@@ -162,7 +209,7 @@ fun AppRoot(
                 // while they scroll, and would have the pages (and their blurred bars) redrawn
                 // underneath each time.
                 AppNavHost(
-                    backStack,
+                    navViewModel,
                     Modifier.drawWithContent { if (!playerSheet.coversScreen) drawContent() },
                 )
             }
@@ -189,7 +236,7 @@ fun AppRoot(
         }
         // Drawn above the pages, dialogs and snackbar. Composed after the pages so its back
         // callback takes priority over theirs.
-        playerSheet.Content()
+        PlayerSheetHost(playerSheet)
     }
 }
 
@@ -201,26 +248,27 @@ fun AppRoot(
  * shared-axis transition of a real entry when pages are pushed or popped.
  */
 @Composable
-private fun AppNavHost(backStack: SnapshotStateList<AppNavKey>, modifier: Modifier = Modifier) {
+private fun AppNavHost(navigation: NavViewModel, modifier: Modifier = Modifier) {
+    val backStack = navigation.backStack
     val density = LocalDensity.current
     val offset = with(density) { NAV_TRANSITION_DISTANCE.roundToPx() } *
         if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1 else -1
-    val pop: () -> Unit = { backStack.removeLastOrNull() }
-    val push: (AppNavKey) -> Unit = { backStack.add(it) }
+    val pop: () -> Unit = navigation::pop
+    val push: (AppNavKey) -> Unit = navigation::navigateTo
     val navDisplayState = rememberAndroidPredictiveBackNavDisplayState(
         backStack = backStack,
-        onBack = { backStack.removeLastOrNull() },
+        onBack = pop,
         entryDecorators = listOf(rememberSaveableStateHolderNavEntryDecorator()),
         entryProvider = entryProvider {
             entry<HomeKey> {
                 // Placeholder: the home itself lives below the NavDisplay, see AppNavHost.
                 Box(Modifier.fillMaxSize())
             }
-            entry<AlbumKey> { LibrarySubScreen(it, onBack = { backStack.removeLastOrNull() }) }
-            entry<GenreKey> { LibrarySubScreen(it, onBack = { backStack.removeLastOrNull() }) }
-            entry<DateKey> { LibrarySubScreen(it, onBack = { backStack.removeLastOrNull() }) }
-            entry<PlaylistKey> { LibrarySubScreen(it, onBack = { backStack.removeLastOrNull() }) }
-            entry<ArtistKey> { LibrarySubScreen(it, onBack = { backStack.removeLastOrNull() }) }
+            entry<AlbumKey> { LibrarySubScreen(it, onBack = pop) }
+            entry<GenreKey> { LibrarySubScreen(it, onBack = pop) }
+            entry<DateKey> { LibrarySubScreen(it, onBack = pop) }
+            entry<PlaylistKey> { LibrarySubScreen(it, onBack = pop) }
+            entry<ArtistKey> { LibrarySubScreen(it, onBack = pop) }
             entry<SearchKey> { key -> SearchScreen(initialQuery = key.query, onBack = pop) }
             entry<SongDetailKey> { key -> SongDetailScreen(mediaId = key.mediaId, onBack = pop) }
             entry<PlaylistEditKey> { key -> PlaylistEditScreen(playlistId = key.id, onBack = pop) }
