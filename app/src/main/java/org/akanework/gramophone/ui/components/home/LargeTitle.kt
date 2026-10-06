@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2025 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -59,20 +59,13 @@ import androidx.compose.ui.unit.sp
 
 val LARGE_TITLE_TOP_GAP = 32.dp
 private val LARGE_TITLE_BOTTOM_GAP = 8.dp
-private val LARGE_TITLE_MARGIN_START = 24.dp
-private val LARGE_TITLE_MARGIN_END = 24.dp
 private val LARGE_TITLE_SIZE = 32.sp // textAppearanceHeadlineLarge
-private val LARGE_TITLE_SUBTITLE_SIZE = 18.sp
-private val LARGE_TITLE_SUBTITLE_GAP = 2.dp
 
 /** Fade-through timings when the title changes to another entry. */
 private const val TITLE_FADE_OUT_MS = 90
 private const val TITLE_FADE_IN_MS = 210
 
 private data class LargeTitleText(val key: Any, val title: String, val subtitle: String?)
-
-/** How far the large title travels under the toolbar before the toolbar's own is fully in. */
-private val TITLE_FADE_SPAN = 48.dp
 
 /**
  * The title of the settings pages: displayMedium at 42sp with a 48sp line height, medium weight.
@@ -108,22 +101,21 @@ fun rememberLargeTitleState(): LargeTitleState {
 }
 
 /**
- * 0 while the large title is clear of the toolbar, 1 once its top is [TITLE_FADE_SPAN] under it.
+ * 0 while the large title is clear of the toolbar, 1 once its top is 48dp under it.
  * [titleTopGap] is how far below the toolbar the title's text starts at rest.
  */
 fun Density.barTitleAlpha(scrolled: Float, titleTopGap: Dp = LARGE_TITLE_TOP_GAP): Float =
-    ((scrolled - titleTopGap.toPx()) / TITLE_FADE_SPAN.toPx()).coerceIn(0f, 1f)
+    ((scrolled - titleTopGap.toPx()) / 48.dp.toPx()).coerceIn(0f, 1f)
 
 /**
  * Scroll offset of the grid's [LargeTitle] item relative to the bottom of the toolbar, in px.
- * Positive once the title is under the toolbar, negative while it is below it or overscrolled.
+ * Positive once the title is under the toolbar, negative while it is below it.
  * The offset is only known while the title or the item above it is visible. Otherwise the capped
  * value is returned, so the result stays continuous. [titleIndex] is the title's index in the
  * grid and [leadingPx] the height of the content above it.
  */
 fun largeTitleScroll(
     grid: LazyGridState,
-    overscroll: IosOverscrollState,
     state: LargeTitleState,
     contentTopPx: Float,
     titleIndex: Int = 0,
@@ -135,7 +127,7 @@ fun largeTitleScroll(
         titleIndex - 1 -> grid.firstVisibleItemScrollOffset.toFloat() - leadingPx
         else -> limit
     }
-    return (scrolled - overscroll.offset).coerceAtMost(limit)
+    return scrolled.coerceAtMost(limit)
 }
 
 /**
@@ -172,8 +164,8 @@ fun LargeTitle(
             .fillMaxWidth()
             .onSizeChanged { state.itemHeight = it.height.toFloat() }
             .padding(
-                start = LARGE_TITLE_MARGIN_START,
-                end = LARGE_TITLE_MARGIN_END,
+                start = 24.dp,
+                end = 24.dp,
                 top = topGap,
                 bottom = bottomGap,
             )
@@ -227,14 +219,14 @@ private fun LargeTitleTexts(
             BasicText(
                 text = subtitle,
                 style = textViewStyle(
-                    LARGE_TITLE_SUBTITLE_SIZE, 400, MaterialTheme.colorScheme.onSurfaceVariant,
+                    18.sp, 400, MaterialTheme.colorScheme.onSurfaceVariant,
                     includeFontPadding = false,
                 ),
                 maxLines = 1,
                 overflow = overflow,
                 softWrap = !marquee,
                 modifier = Modifier
-                    .padding(top = LARGE_TITLE_SUBTITLE_GAP)
+                    .padding(top = 2.dp)
                     .then(lineModifier),
             )
         }

@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2024 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -18,7 +18,6 @@
 package org.akanework.gramophone.ui.components.home
 
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,7 +46,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -58,26 +56,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.akanework.gramophone.R
 import org.akanework.gramophone.ui.HomeTab
 import org.akanework.gramophone.ui.actions.HomeMenuAction
 import org.akanework.gramophone.ui.components.compose.AppDropdownMenu
+import org.akanework.gramophone.ui.components.compose.TileButton
+import org.akanework.gramophone.ui.components.compose.TintedIcon
 import org.akanework.gramophone.ui.theme.LocalCardSurface
 import kotlin.math.PI
 import kotlin.math.abs
@@ -87,10 +84,8 @@ import kotlin.math.sin
 
 val TAB_ROW_HEIGHT = 48.dp
 private val TAB_CONTENT_PADDING = 24.dp
-private val TAB_PADDING = 12.dp
 /** How far the chip indicator sits inside the tab row, top and bottom. */
 val TAB_INDICATOR_INSET = 6.dp
-private val TAB_INDICATOR_RADIUS = 12.dp
 
 // The connected app-bar actions (search, the optional sort, overflow): filled buttons, rounded
 // 24dp on the group's outer edges and 4dp where they face each other, with a 4dp gap between them.
@@ -98,7 +93,6 @@ private val ACTION_BUTTON_WIDTH = 42.dp
 val ACTION_BUTTON_HEIGHT = 44.dp
 private val ACTION_OUTER_CORNER = 24.dp
 private val ACTION_INNER_CORNER = 4.dp
-private val ACTION_BUTTON_GAP = 4.dp
 private val ACTION_ICON_INNER_OFFSET = 2.dp
 private val SEARCH_BUTTON_SHAPE = RoundedCornerShape(
     topStart = ACTION_OUTER_CORNER, bottomStart = ACTION_OUTER_CORNER,
@@ -108,15 +102,6 @@ private val OVERFLOW_BUTTON_SHAPE = RoundedCornerShape(
     topStart = ACTION_INNER_CORNER, bottomStart = ACTION_INNER_CORNER,
     topEnd = ACTION_OUTER_CORNER, bottomEnd = ACTION_OUTER_CORNER,
 )
-
-/**
- * The home's glass toolbar: the app name, fading in as the page's large title slides under it,
- * with the search and overflow actions. [scrolled] is the page's travel from rest, see
- * [largeTitleScroll]. The tab row is not part of it: it scrolls with the content, see
- * [HomeTabRow].
- */
-private val BAR_PADDING_START = 24.dp
-private val BAR_PADDING_END = 16.dp
 
 /** The home's bar: the app's mark at the start, the search and overflow actions at the end. */
 @Composable
@@ -131,7 +116,7 @@ fun HomeAppBar(
             .fillMaxWidth()
             .windowInsetsPadding(insets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
             .height(GLASS_BAR_HEIGHT)
-            .padding(start = BAR_PADDING_START, end = BAR_PADDING_END),
+            .padding(start = 24.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -140,52 +125,22 @@ fun HomeAppBar(
             tint = MaterialTheme.colorScheme.onSurface,
         )
         Spacer(Modifier.weight(1f))
-        HomeActionButton(
-            icon = Icons.Outlined.Search,
-            description = stringResource(R.string.search),
-            iconSize = 24.dp,
-            shape = SEARCH_BUTTON_SHAPE,
-            iconOffsetX = ACTION_ICON_INNER_OFFSET, // nudge toward the inner edge
+        val cardSurface = LocalCardSurface.current
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        TileButton(
             onClick = onSearch,
-        )
-        Spacer(Modifier.width(ACTION_BUTTON_GAP))
+            modifier = Modifier.size(ACTION_BUTTON_WIDTH, ACTION_BUTTON_HEIGHT),
+            shape = SEARCH_BUTTON_SHAPE,
+            container = { cardSurface },
+        ) {
+            // Nudged toward the inner edge, for optical balance
+            TintedIcon(
+                Icons.Outlined.Search, { onSurface }, Modifier.offset(x = ACTION_ICON_INNER_OFFSET),
+                stringResource(R.string.search),
+            )
+        }
+        Spacer(Modifier.width(4.dp))
         HomeOverflowMenu(onMenuAction)
-    }
-}
-
-/**
- * One of the connected app-bar actions: a filled [ACTION_BUTTON_WIDTH]×[ACTION_BUTTON_HEIGHT]
- * button rounded 24dp on its outer edge and 4dp on the edge facing its neighbour, with the icon
- * nudged [iconOffsetX] toward the inner edge for optical balance.
- */
-@Composable
-private fun HomeActionButton(
-    icon: ImageVector,
-    description: String,
-    iconSize: Dp,
-    shape: Shape,
-    iconOffsetX: Dp,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier
-            .size(width = ACTION_BUTTON_WIDTH, height = ACTION_BUTTON_HEIGHT)
-            .clip(shape)
-            .background(LocalCardSurface.current)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onClick,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.offset(x = iconOffsetX).size(iconSize),
-        )
     }
 }
 
@@ -194,14 +149,19 @@ private fun HomeActionButton(
 private fun HomeOverflowMenu(onMenuAction: (HomeMenuAction) -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
     Box {
-        HomeActionButton(
-            icon = Icons.Outlined.MoreVert,
-            description = stringResource(R.string.more),
-            iconSize = 24.dp,
-            shape = OVERFLOW_BUTTON_SHAPE,
-            iconOffsetX = -ACTION_ICON_INNER_OFFSET, // nudge toward the inner edge
+        val cardSurface = LocalCardSurface.current
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        TileButton(
             onClick = { menuOpen = true },
-        )
+            modifier = Modifier.size(ACTION_BUTTON_WIDTH, ACTION_BUTTON_HEIGHT),
+            shape = OVERFLOW_BUTTON_SHAPE,
+            container = { cardSurface },
+        ) {
+            TintedIcon(
+                Icons.Outlined.MoreVert, { onSurface }, Modifier.offset(x = -ACTION_ICON_INNER_OFFSET),
+                stringResource(R.string.more),
+            )
+        }
         AppDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             HomeMenuAction.entries.forEach { action ->
                 DropdownMenuItem(
@@ -267,7 +227,7 @@ fun LabelTabRow(
     val selectedColor = MaterialTheme.colorScheme.onSecondaryContainer
     val unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
     val inset = with(density) { TAB_INDICATOR_INSET.toPx().toInt().toFloat() }
-    val radius = with(density) { TAB_INDICATOR_RADIUS.toPx() }
+    val radius = with(density) { 12.dp.toPx() }
 
     // Keep the selected tab centred, like TabLayout.calculateScrollXForTab.
     LaunchedEffect(selectedTab, rowWidth) {
@@ -323,10 +283,13 @@ fun LabelTabRow(
                     .onGloballyPositioned { coords ->
                         tabBounds[index] = coords.positionInParent().x to coords.size.width.toFloat()
                     }
-                    .padding(horizontal = TAB_PADDING),
+                    .padding(horizontal = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 val selected = index == selectedTab
+                // As wide as the label selected either way: in Latin scripts the heavier weight
+                // is wider, and the tabs and the indicator would shift as the selection moves
+                SingleLineText(label, 15.sp, 600, Color.Transparent)
                 SingleLineText(
                     label, 15.sp, if (selected) 600 else 500,
                     if (selected) selectedColor else unselectedColor,

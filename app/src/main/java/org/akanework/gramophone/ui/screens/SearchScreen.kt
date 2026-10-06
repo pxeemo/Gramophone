@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2025 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
@@ -56,6 +57,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.max
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -63,17 +65,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import org.akanework.gramophone.R
 import org.akanework.gramophone.ui.LibraryAdapterTypes
+import org.akanework.gramophone.ui.components.compose.BackButton
+import org.akanework.gramophone.ui.components.compose.LibraryIconButton
 import org.akanework.gramophone.ui.components.compose.rememberDefaultPreferences
-import org.akanework.gramophone.ui.components.home.BackButton
 import org.akanework.gramophone.ui.components.home.GLASS_BAR_HEIGHT
-import org.akanework.gramophone.ui.components.home.LibraryIconButton
 import org.akanework.gramophone.ui.components.home.glassHazeStyle
-import org.akanework.gramophone.ui.components.home.rememberIosOverscrollState
 import org.akanework.gramophone.ui.components.home.rememberNowPlayingState
 import org.akanework.gramophone.ui.components.home.textViewStyle
 import org.akanework.gramophone.ui.components.home.topEdgeBlur
 import org.akanework.gramophone.ui.library.Sorter
 import org.akanework.gramophone.ui.nav.LocalAppBarTopPadding
+import org.akanework.gramophone.ui.nav.LocalListBottomPadding
 import org.akanework.gramophone.ui.state.LibraryTabSpec
 import org.akanework.gramophone.ui.state.LibraryTabState
 import org.koin.compose.koinInject
@@ -83,8 +85,6 @@ import uk.akane.libphonograph.reader.FlowReader
  * The search page: a text field in the glass bar, and under it the song list filtered by what
  * is typed, matching on title, album and artist.
  */
-
-private val FIELD_TEXT_SIZE = 18.sp
 
 @Composable
 fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier = Modifier) {
@@ -111,7 +111,6 @@ fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier =
     val queueTitle = stringResource(R.string.search_query, query)
     LaunchedEffect(queueTitle) { state.queueTitleOverride = queueTitle }
     val nowPlaying = rememberNowPlayingState()
-    val overscroll = rememberIosOverscrollState()
     val hazeState = remember { HazeState() }
     val insets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val topInset = insets.asPaddingValues().calculateTopPadding()
@@ -120,15 +119,21 @@ fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier =
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    // The window is drawn under the keyboard, so the results keep clear of it themselves.
+    val listBottom = max(
+        WindowInsets.ime.asPaddingValues().calculateBottomPadding(), libraryBottomPadding(),
+    )
 
     Box(modifier.fillMaxSize().background(background)) {
         Box(Modifier.fillMaxSize().hazeSource(hazeState).background(background)) {
-            CompositionLocalProvider(LocalAppBarTopPadding provides barTopPadding) {
+            CompositionLocalProvider(
+                LocalAppBarTopPadding provides barTopPadding,
+                LocalListBottomPadding provides listBottom,
+            ) {
                 LibraryTabScreen(
                     state = state,
                     nowPlaying = nowPlaying,
                     reselectTick = 0,
-                    overscroll = overscroll,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -149,7 +154,7 @@ fun SearchScreen(initialQuery: String?, onBack: () -> Unit, modifier: Modifier =
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 BackButton(onBack)
-                val textStyle = textViewStyle(FIELD_TEXT_SIZE, 400, MaterialTheme.colorScheme.onSurface)
+                val textStyle = textViewStyle(18.sp, 400, MaterialTheme.colorScheme.onSurface)
                 BasicTextField(
                     value = query,
                     onValueChange = { query = it },

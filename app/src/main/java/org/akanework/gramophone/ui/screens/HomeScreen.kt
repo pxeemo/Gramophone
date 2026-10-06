@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2024 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -65,7 +65,6 @@ import org.akanework.gramophone.ui.components.home.ACTION_BUTTON_HEIGHT
 import org.akanework.gramophone.ui.components.home.GLASS_BAR_HEIGHT
 import org.akanework.gramophone.ui.components.home.HomeAppBar
 import org.akanework.gramophone.ui.components.home.HomeTabRow
-import org.akanework.gramophone.ui.components.home.IosOverscrollState
 import org.akanework.gramophone.ui.components.home.LIBRARY_GROUP_CORNER
 import org.akanework.gramophone.ui.components.home.LIBRARY_SIDE_MARGIN
 import org.akanework.gramophone.ui.components.home.TAB_INDICATOR_INSET
@@ -99,7 +98,6 @@ private val HEADER_GAP = 20.dp
 private val BUTTON_TO_BAR_BOTTOM = (GLASS_BAR_HEIGHT - ACTION_BUTTON_HEIGHT) / 2
 private val TABS_OVERLAP_BAR = BUTTON_TO_BAR_BOTTOM + TAB_INDICATOR_INSET - HEADER_GAP
 private val TABS_TO_SHEET_GAP = HEADER_GAP - TAB_INDICATOR_INSET
-private val BAR_TO_SHEET_GAP = 16.dp
 
 /**
  * Between the sheet and what is under it: the mini player, or else the navigation bar. The same
@@ -125,8 +123,6 @@ fun HomeScreen(modifier: Modifier = Modifier) {
     // Height (px) from the screen bottom to the collapsed mini player's top, 0 when it is hidden.
     val playerBottomPadding = LocalPlayerBottomPadding.current
     val insets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
-    val overscrolls = remember { HashMap<HomeTab, IosOverscrollState>() }
-    fun overscrollOf(tab: HomeTab) = overscrolls.getOrPut(tab) { IosOverscrollState() }
     // The sheet ends above the mini player. The mini player animates with the page transition,
     // so the inset uses the same curve. Otherwise the sheet's bottom edge would jump when
     // navigating away from or back to home. Read in the layout phase, so the animation doesn't
@@ -165,7 +161,7 @@ fun HomeScreen(modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.height(TABS_TO_SHEET_GAP))
         } else {
-            Spacer(Modifier.height(BAR_TO_SHEET_GAP))
+            Spacer(Modifier.height(16.dp))
         }
         // The sheet. The pages scroll inside it, clipped by its corners, their items on its
         // surface with its colour showing between them. It keeps nothing clear at its top or
@@ -208,7 +204,6 @@ fun HomeScreen(modifier: Modifier = Modifier) {
                             state = viewModel.tabState(spec),
                             nowPlaying = nowPlaying,
                             reselectTick = reselectTicks[tab] ?: 0,
-                            overscroll = overscrollOf(tab),
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
@@ -216,7 +211,6 @@ fun HomeScreen(modifier: Modifier = Modifier) {
                             state = viewModel.folderState(isDetailed = tab == HomeTab.FileSystem),
                             nowPlaying = nowPlaying,
                             reselectTick = reselectTicks[tab] ?: 0,
-                            overscroll = overscrollOf(tab),
                             modifier = Modifier.fillMaxSize(),
                         )
                     }

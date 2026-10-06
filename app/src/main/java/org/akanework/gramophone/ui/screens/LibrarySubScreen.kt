@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2024 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -26,7 +26,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -47,12 +46,14 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.overscroll
+import androidx.compose.foundation.rememberOverscrollEffect
+import androidx.compose.foundation.withoutVisualEffect
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
@@ -72,18 +73,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLocale
@@ -110,12 +107,12 @@ import org.akanework.gramophone.ui.LibraryAdapterTypes
 import org.akanework.gramophone.ui.actions.AppActionEnv
 import org.akanework.gramophone.ui.actions.LibraryActions
 import org.akanework.gramophone.ui.actions.rememberAppActionEnv
+import org.akanework.gramophone.ui.components.compose.IconTileButton
 import org.akanework.gramophone.ui.components.compose.rememberDefaultPreferences
 import org.akanework.gramophone.ui.components.home.DECOR_HEIGHT
 import org.akanework.gramophone.ui.components.home.GLASS_BAR_HEIGHT
 import org.akanework.gramophone.ui.components.home.GRID_CARD_SIDE_PADDING
 import org.akanework.gramophone.ui.components.home.GlassTitleBar
-import org.akanework.gramophone.ui.components.home.IosOverscrollState
 import org.akanework.gramophone.ui.components.home.LIST_HEIGHT
 import org.akanework.gramophone.ui.components.home.LargeTitle
 import org.akanework.gramophone.ui.components.home.LargeTitleState
@@ -125,10 +122,7 @@ import org.akanework.gramophone.ui.components.home.ListRowLeading
 import org.akanework.gramophone.ui.components.home.NowPlayingState
 import org.akanework.gramophone.ui.components.home.SingleLineText
 import org.akanework.gramophone.ui.components.home.SortMenuChooser
-import org.akanework.gramophone.ui.components.home.iosOverscroll
 import org.akanework.gramophone.ui.components.home.largeTitleScroll
-import org.akanework.gramophone.ui.components.home.rememberIosFlingBehavior
-import org.akanework.gramophone.ui.components.home.rememberIosOverscrollState
 import org.akanework.gramophone.ui.components.home.rememberLargeTitleState
 import org.akanework.gramophone.ui.components.home.rememberNowPlayingState
 import org.akanework.gramophone.ui.components.home.textViewStyle
@@ -175,21 +169,13 @@ private const val ALBUMS_HEADER_INDEX = SHEET_TOP_INDEX + 1
 
 /** The rounded top of the sheet, above its first row. */
 private val SHEET_TOP_HEIGHT = 16.dp
-private val SHEET_CORNER = 28.dp
-
-/** Title size, smaller than the library's large title to fit next to the buttons. */
-private val TITLE_SIZE = 28.sp
 
 /** Gap between the title and the carousel above and the sheet below. */
 private val TITLE_GAP = 24.dp
 
 /** The play and shuffle buttons after the title. */
 private val TITLE_BUTTON_SIZE = 56.dp
-private val TITLE_BUTTON_GAP = 12.dp
 private val TITLE_BUTTON_ICON_SIZE = 26.dp
-
-/** Inset of the playing song's rounded container from the sheet's sides. */
-private val PLAYING_ROW_INSET = 8.dp
 
 /** The data behind a detail page: a title, its songs and, for artists, its albums. */
 private class LibrarySubPage(
@@ -485,6 +471,8 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
     val gridState = rememberLazyGridState()
     val restore = remember { ScrollRestore(gridState) }
     val shown = rememberShownEntry(key, siblings, gridState, restore)
+    // So opening the entry it shows (from the player, say) doesn't stack the same page again.
+    SideEffect { navViewModel.setShownDestination(key, shown.key) }
     val shownToken = entryToken(shown.key)
     val page = remember(shownToken) {
         LibrarySubPage.create(shown.key, context, reader, prefs, scope)
@@ -507,19 +495,19 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
     val contentTopPx = with(density) { contentTop.toPx() }
     val carouselHeightPx = with(density) { subCarouselHeight().toPx() }
     val titleState = rememberLargeTitleState()
-    val overscroll = rememberIosOverscrollState()
     // The carousel is the item before the title, so the title only starts to scroll under the
     // toolbar after the carousel has.
     val scrolled = {
         largeTitleScroll(
-            gridState, overscroll, titleState, contentTopPx,
+            gridState, titleState, contentTopPx,
             titleIndex = TITLE_INDEX, leadingPx = carouselHeightPx,
         )
     }
-    // Scroll offset of the carousel from rest, overscroll included. Drives the carousel buttons
+    // Scroll offset of the carousel from rest. Drives the carousel buttons
     // and the toolbar blur.
     val pageScroll = { (scrolled() + carouselHeightPx) }
-    val frostSpanPx = with(density) { CAROUSEL_FROST_SPAN.toPx() }
+    // How far the page scrolls while the toolbar's blur fades in
+    val frostSpanPx = with(density) { 24.dp.toPx() }
     val rowHeightPx = with(density) { LIST_HEIGHT.roundToPx() }
     // The content scrolls under the toolbar, so jumps land below it.
     val toolbarPx = with(density) { (GLASS_BAR_HEIGHT - CAROUSEL_TOP_GAP).roundToPx() }
@@ -547,7 +535,6 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
                 LibrarySubList(
                     page = page,
                     gridState = gridState,
-                    overscroll = overscroll,
                     nowPlaying = nowPlaying,
                     env = env,
                     queueTitle = title.value,
@@ -636,7 +623,6 @@ fun LibrarySubScreen(key: LibrarySubKey, onBack: () -> Unit, modifier: Modifier 
 private fun LibrarySubList(
     page: LibrarySubPage,
     gridState: LazyGridState,
-    overscroll: IosOverscrollState,
     nowPlaying: NowPlayingState,
     env: AppActionEnv,
     /** Title of the queues played from the headers. */
@@ -665,19 +651,22 @@ private fun LibrarySubList(
     // album title shared by several albums. Read from the songs' extras, so no IO.
     val numberedCovers = page.numberedCovers ||
         remember(songs.items) { songsSpanAlbums(songs.items) }
+    // A playlist may list a song more than once. The keys go with this very list.
+    val songItems = songs.items
+    val songKeys = remember(songItems) { uniqueKeys(songItems) { "song:" + it.mediaId } }
     val firstSongIndex = page.firstSongIndex
+    val overscroll = rememberOverscrollEffect()
     Box(modifier) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
             modifier = Modifier
                 .fillMaxSize()
-                .iosOverscroll(overscroll)
-                // After iosOverscroll, so the sheet is offset by the overscroll too.
-                .drawBehind { drawListSheet(gridState, sheet.value, SHEET_CORNER.toPx()) },
+                // Drawn around the sheet too, so it stretches with the songs on it
+                .overscroll(overscroll)
+                .drawBehind { drawListSheet(gridState, sheet.value, 28.dp.toPx()) },
             contentPadding = libraryContentPadding(top = contentTop),
-            flingBehavior = rememberIosFlingBehavior(gridState),
-            overscrollEffect = null,
+            overscrollEffect = overscroll?.withoutVisualEffect(),
         ) {
             // At CAROUSEL_INDEX, TITLE_INDEX and SHEET_TOP_INDEX.
             item(key = "carousel", span = { GridItemSpan(maxLineSpan) }) { carousel() }
@@ -716,7 +705,7 @@ private fun LibrarySubList(
                             end = if (albumIsGrid && last) GRID_CARD_SIDE_PADDING else 0.dp,
                         )
                     ) {
-                        LibraryItem(albums, item, nowPlaying, env, albums.layoutType)
+                        LibraryItem(albums, item, index, nowPlaying, env, albums.layoutType)
                     }
                 }
                 item(key = "songs-header", span = { GridItemSpan(maxLineSpan) }) {
@@ -729,21 +718,21 @@ private fun LibrarySubList(
                 }
             }
             itemsIndexed(
-                songs.items,
-                key = { _, it -> "song:" + it.mediaId },
+                songItems,
+                key = { index, _ -> songKeys[index] },
                 span = { _, _ -> GridItemSpan(columns / songColumns) },
             ) { index, item ->
                 // An album's songs go by their track numbers, other lists by their position.
                 val number = (if (page.trackNumbers) item.mediaMetadata.trackNumber
                     ?.takeIf { it > 0 } else null) ?: (index + 1)
                 LibraryItem(
-                    songs, item, nowPlaying, env, songLayout, Modifier.animateItem(),
+                    songs, item, index, nowPlaying, env, songLayout, Modifier.animateItem(),
                     leading = ListRowLeading.Number(number, withCover = numberedCovers),
                     // Each song's length.
                     trailing = item.mediaMetadata.durationMs
                         ?.let { convertDurationToTimeStamp(it) },
                     // The playing song's container keeps clear of the sheet's edges.
-                    containerInset = PLAYING_ROW_INSET,
+                    containerInset = 8.dp,
                 )
             }
             if (songs.items.isNotEmpty()) {
@@ -806,7 +795,8 @@ private fun SubPageTitle(
         title, state, scrolled,
         subtitle = subtitle, marquee = true,
         style = textViewStyle(
-            TITLE_SIZE, 400, MaterialTheme.colorScheme.onSurface, includeFontPadding = false,
+            // Smaller than the library's large title, to fit next to the buttons
+            28.sp, 400, MaterialTheme.colorScheme.onSurface, includeFontPadding = false,
         ),
         contentKey = contentKey,
         // Centred between the carousel cards and the sheet. The carousel's bottom padding is part
@@ -912,53 +902,26 @@ private fun formatTotalDuration(ms: Long, locale: Locale): String {
 @Composable
 private fun TitleButtons(onPlay: () -> Unit, onShuffle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    // Eased into the cover's colours with the rest of the page
+    @Composable
+    fun animated(color: Color) = animateColorAsState(color, tween(THEME_ANIMATION_MS), label = "button")
+    val primary by animated(colors.primary)
+    val onPrimary by animated(colors.onPrimary)
+    val tertiary by animated(colors.tertiary)
+    val onTertiary by animated(colors.onTertiary)
     Row(
         Modifier.padding(start = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(TITLE_BUTTON_GAP),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        TitleButton(
-            icon = Icons.Outlined.PlayArrow,
-            description = stringResource(R.string.play),
-            shape = MaterialShapes.Cookie9Sided.toShape(),
-            container = colors.primary,
-            content = colors.onPrimary,
-            onClick = onPlay,
+        IconTileButton(
+            Icons.Outlined.PlayArrow, stringResource(R.string.play), { onPrimary }, onPlay,
+            Modifier.size(TITLE_BUTTON_SIZE), iconSize = TITLE_BUTTON_ICON_SIZE,
+            shape = MaterialShapes.Cookie9Sided.toShape(), container = { primary },
         )
-        TitleButton(
-            icon = Icons.Outlined.Shuffle,
-            description = stringResource(R.string.shuffle),
-            shape = MaterialShapes.Cookie4Sided.toShape(),
-            container = colors.tertiary,
-            content = colors.onTertiary,
-            onClick = onShuffle,
-        )
-    }
-}
-
-@Composable
-private fun TitleButton(
-    icon: ImageVector,
-    description: String,
-    shape: Shape,
-    container: Color,
-    content: Color,
-    onClick: () -> Unit,
-) {
-    val fill by animateColorAsState(container, tween(THEME_ANIMATION_MS), label = "button")
-    val tint by animateColorAsState(content, tween(THEME_ANIMATION_MS), label = "button icon")
-    Box(
-        Modifier
-            .size(TITLE_BUTTON_SIZE)
-            .clip(shape)
-            .drawBehind { drawRect(fill) }
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = tint,
-            modifier = Modifier.size(TITLE_BUTTON_ICON_SIZE),
+        IconTileButton(
+            Icons.Outlined.Shuffle, stringResource(R.string.shuffle), { onTertiary }, onShuffle,
+            Modifier.size(TITLE_BUTTON_SIZE), iconSize = TITLE_BUTTON_ICON_SIZE,
+            shape = MaterialShapes.Cookie4Sided.toShape(), container = { tertiary },
         )
     }
 }

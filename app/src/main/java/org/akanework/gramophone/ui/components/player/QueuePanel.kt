@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2025 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -16,7 +16,7 @@
  */
 package org.akanework.gramophone.ui.components.player
 
-import android.content.Context
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,9 +29,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteSweep
@@ -40,27 +38,28 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
 import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
+import kotlinx.coroutines.delay
 import org.akanework.gramophone.R
 import org.akanework.gramophone.logic.defaultPrefs
 import org.akanework.gramophone.logic.getBooleanStrict
@@ -68,206 +67,111 @@ import org.akanework.gramophone.logic.utils.Flags
 import org.akanework.gramophone.logic.utils.convertDurationToTimeStamp
 import org.akanework.gramophone.ui.MediaControllerViewModel
 import org.akanework.gramophone.ui.components.compose.DismissibleRow
-import org.akanework.gramophone.ui.components.compose.rememberReorderableListState
-import org.akanework.gramophone.ui.components.compose.reorderHandle
-import org.akanework.gramophone.ui.components.compose.reorderableRow
 import org.akanework.gramophone.ui.components.home.EDITABLE_ROW_HEIGHT
 import org.akanework.gramophone.ui.components.home.EditableSongRow
 import org.akanework.gramophone.ui.components.home.LIBRARY_PLAYING_CORNER
 import org.akanework.gramophone.ui.components.home.LibraryFastScroller
 import org.akanework.gramophone.ui.components.home.nowPlayingRowColors
-import org.akanework.gramophone.ui.fragments.compose.QueueRoot
+import org.akanework.gramophone.ui.fragments.compose.MqContent
+import org.akanework.gramophone.ui.fragments.compose.MqState
+import org.akanework.gramophone.ui.fragments.compose.QueueTimer
 import org.akanework.gramophone.ui.fragments.compose.rememberMqState
 
 /*
- * The queue, under the full player: the queue head (the multi-queue pages, the actions and the
- * time left) over the songs, which can be dragged into another order or swiped away.
+ * The queue, under the full player: the queue head (the multi-queue preview and the time left)
+ * over the songs, which can be dragged into another order or swiped away, and the actions over
+ * them.
  */
-
-/** As wide as the queue gets on large screens, wider with the multi-queue preview. */
-private val QUEUE_MAX_WIDTH = 640.dp
-private val WIDE_QUEUE_MAX_WIDTH = 900.dp
 
 /** Around the FABs, and between them. */
 private val QUEUE_FAB_MARGIN = 16.dp
 private val QUEUE_FAB_GAP = 12.dp
 
-/** A FAB's size. */
-private val QUEUE_FAB_SIZE = 56.dp
-
-/** What the queue's end leaves for the FABs over it: a small FAB above a FAB, with margins. */
-private val QUEUE_FABS_ROOM = QUEUE_FAB_MARGIN * 2 + 40.dp + QUEUE_FAB_GAP + QUEUE_FAB_SIZE
-
-/** What the multi-queue state asks of the queue it shows in. */
-interface QueueSheetHost {
-    val lifecycle: Lifecycle
-    val context: Context
-
-    /** The song the player is on, as a position in the queue's order, or null for none. */
-    var currentMediaItemIndex: Int?
-
-    fun lockQueue(lock: Boolean)
-    fun dismiss()
-    fun scrollToPositionWithOffset(position: Int, offsetPx: Int)
-    fun smoothScrollTo(position: Int)
-    fun notifyListChanged()
-    fun updateTimer(totalMs: Long, baseRealtime: Long, running: Boolean)
-}
-
 @Stable
-private class QueueRow(val key: String, val item: MediaItem)
-
-private class QueueSheetState(
-    override val context: Context,
-    private val onDismissRequest: () -> Unit,
-) : QueueSheetHost, LifecycleOwner {
-    private val registry = LifecycleRegistry(this)
-    override val lifecycle: Lifecycle get() = registry
-
-    val listState = LazyListState()
-    override var currentMediaItemIndex: Int? by mutableStateOf(null)
-    var locked by mutableStateOf(false)
-        private set
-    var listVersion by mutableIntStateOf(0)
-        private set
-    var pendingScroll by mutableStateOf<Pair<Int, Int>?>(null)
-    var pendingSmoothScroll by mutableStateOf<Int?>(null)
-
-    fun onShow() {
-        registry.currentState = Lifecycle.State.RESUMED
-    }
-
-    fun onHide() {
-        registry.currentState = Lifecycle.State.DESTROYED
-    }
-
-    override fun lockQueue(lock: Boolean) {
-        locked = lock
-    }
-
-    override fun dismiss() = onDismissRequest()
-
-    override fun scrollToPositionWithOffset(position: Int, offsetPx: Int) {
-        pendingScroll = position to offsetPx
-    }
-
-    override fun smoothScrollTo(position: Int) {
-        pendingSmoothScroll = position
-    }
-
-    override fun notifyListChanged() {
-        listVersion++
-    }
-
-    // The queue doesn't show its time left
-    override fun updateTimer(totalMs: Long, baseRealtime: Long, running: Boolean) {}
-}
+private class QueueRow(val key: Long, val item: MediaItem)
 
 /**
- * The queue of [controller]; [onDismiss] puts it away, as when it's cleared. The caller keeps it
- * clear of the cutouts and side navigation bars, it pads its songs for the bottom one.
+ * The queue of [controller], brought up and put away (as when it's cleared) by [reveal]. The
+ * caller keeps it clear of the cutouts and side navigation bars, it pads its songs for the bottom
+ * one. It carries on across the controller going away as the activity stops and a new one
+ * connecting as it starts again.
  */
 @Composable
 fun QueuePanel(
     controller: MediaControllerViewModel,
-    onDismiss: () -> Unit,
+    reveal: QueueRevealState,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val host = remember { QueueSheetState(context, onDismiss) }
-    DisposableEffect(host) {
-        host.onShow()
-        onDispose { host.onHide() }
+    // Not connected to the player yet: nothing to show
+    val mqState = rememberMqState(context, scope, controller, reveal::hide) ?: return
+    DisposableEffect(mqState) {
+        mqState.onShow()
+        onDispose { mqState.onHide() }
     }
-    val mqState = rememberMqState(scope, controller, host)
-    if (mqState == null) {
-        // Not connected to the player: nothing to show.
-        LaunchedEffect(Unit) { onDismiss() }
-        return
+    val mqEnabled = remember { context.defaultPrefs.getBooleanStrict("mq_preview", false) }
+
+    val listState = mqState.listState
+    val navigationBar = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // Scrolls as a dragged row nears the top of the list, or the navigation bar at its end
+    val reorder = rememberReorderableLazyListState(
+        listState, PaddingValues(bottom = navigationBar),
+    ) { from, to -> mqState.moveRow(from.index, to.index) }
+    // Loaded, brought up to date and scrolled to the song playing each time it comes up
+    LaunchedEffect(mqState) {
+        snapshotFlow { reveal.shown }.collect { mqState.shown = it }
     }
-    val mqEnabled = remember { Flags.MQ_PREVIEW && context.defaultPrefs.getBooleanStrict("mq_preview", false) }
-    val pagerState = rememberPagerState(initialPage = if (Flags.MQ_PREVIEW) 0 else 1) { 2 }
-    val instance = controller.get()
-
-    DisposableEffect(host, mqState) {
-        val listener = object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (mqState.isDetached()) return
-                val i = instance?.currentMediaItemIndex
-                host.currentMediaItemIndex = i?.let { mqState.playlist.first.indexOf(it) }
-            }
-
-            override fun onPositionDiscontinuity(
-                oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int,
-            ) {
-                if (mqState.isDetached()) return
-                mqState.updateTimer()
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                mqState.updateTimer()
-            }
-        }
-        controller.addRecreationalPlayerListener(host.lifecycle, listener) {
-            listener.onMediaItemTransition(
-                instance?.currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
-            )
-            listener.onIsPlayingChanged(instance?.isPlaying ?: false)
-        }
-        onDispose {}
+    LaunchedEffect(mqState, reorder) {
+        snapshotFlow { reorder.isAnyItemDragging }.collect { mqState.dragging = it }
     }
-
-    val listState = host.listState
-    LaunchedEffect(host.pendingScroll) {
-        host.pendingScroll?.let { (position, offset) ->
+    LaunchedEffect(mqState.pendingScroll) {
+        mqState.pendingScroll?.let { (position, offset) ->
             if (position >= 0) listState.scrollToItem(position, -offset)
-            host.pendingScroll = null
+            mqState.pendingScroll = null
         }
     }
-    LaunchedEffect(host.pendingSmoothScroll) {
-        host.pendingSmoothScroll?.let { position ->
+    LaunchedEffect(mqState.pendingSmoothScroll) {
+        mqState.pendingSmoothScroll?.let { position ->
             if (position >= 0) listState.animateScrollToItem(position)
-            host.pendingSmoothScroll = null
+            mqState.pendingSmoothScroll = null
         }
     }
 
-    val version = host.listVersion
-    val rows = remember(version) {
+    val version = mqState.listVersion
+    val rows = remember(mqState, version) {
         val (order, items) = mqState.playlist
-        val seen = HashMap<String, Int>()
-        order.map { i ->
-            val item = items[i]
-            val nth = (seen[item.mediaId] ?: 0) + 1
-            seen[item.mediaId] = nth
-            QueueRow(item.mediaId + "#" + nth, item)
-        }
+        order.map { i -> QueueRow(mqState.songKey(i), items[i]) }
     }
     val editable = !mqState.isDetached()
-    val reorder = rememberReorderableListState(listState) { from, to -> mqState.moveRow(from, to) }
     val unknownArtist = stringResource(R.string.unknown_artist)
-    val currentArtwork = host.currentMediaItemIndex?.let { rows.getOrNull(it) }?.item?.mediaMetadata?.artworkUri
+    val currentArtwork = rows.getOrNull(mqState.currentMediaItemIndex)?.item?.mediaMetadata?.artworkUri
     val nowPlayingColors = nowPlayingColors(
         rememberArtworkColorScheme(currentArtwork), MaterialTheme.colorScheme.primary,
     )
 
-    val navigationBar = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Box(modifier, contentAlignment = Alignment.TopCenter) {
         Column(
             Modifier
-                .widthIn(max = if (mqEnabled) WIDE_QUEUE_MAX_WIDTH else QUEUE_MAX_WIDTH)
+                .widthIn(max = if (mqEnabled) 900.dp else 640.dp)
                 .fillMaxSize(),
         ) {
-            // The multi-queue head. Without it, there's nothing over the songs
-            if (Flags.MQ_PREVIEW) {
-                QueueRoot(
+            if (Flags.MQ_PREVIEW && mqEnabled) {
+                MqContent(
                     mqState = mqState,
-                    pagerState = pagerState,
-                    coroutineScope = scope,
                     mqEnabled = mqEnabled,
-                    onDismiss = onDismiss,
+                    landscape = false,
+                    onDismiss = reveal::hide,
                 )
             }
+            QueueTimeLeft(
+                mqState.timer,
+                ticking = reveal.shown,
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = QUEUE_FAB_MARGIN)
+                    .padding(bottom = 8.dp),
+            )
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -276,33 +180,37 @@ fun QueuePanel(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    // The last songs scroll up clear of the FABs
-                    contentPadding = PaddingValues(bottom = navigationBar + QUEUE_FABS_ROOM),
+                    // The last songs scroll up clear of the FABs: a small one over a regular one
+                    contentPadding = PaddingValues(
+                        bottom = navigationBar + QUEUE_FAB_MARGIN * 2 + 40.dp + QUEUE_FAB_GAP + 56.dp,
+                    ),
                 ) {
                     itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
                         val item = row.item
-                        DismissibleRow(
-                            onDismissed = { mqState.removeRow(index) },
-                            modifier = Modifier.reorderableRow(this, reorder, index),
-                            enabled = editable,
-                        ) {
-                            val duration = item.mediaMetadata.durationMs?.convertDurationToTimeStamp()
-                            val artist = item.mediaMetadata.artist?.toString() ?: unknownArtist
-                            EditableSongRow(
-                                title = item.mediaMetadata.title?.toString().orEmpty(),
-                                subtitle = stringResource(R.string.artist_time, duration ?: "", artist),
-                                cover = item.mediaMetadata.artworkUri,
-                                defaultCover = R.drawable.ic_default_cover,
-                                onClick = { mqState.clickRow(index) },
-                                onRemove = { mqState.removeRow(index) },
-                                handleModifier = if (editable) Modifier.reorderHandle(reorder, index) else Modifier,
-                                showControls = editable,
-                                colors = nowPlayingRowColors(
-                                    isCurrent = index == host.currentMediaItemIndex,
-                                    colors = nowPlayingColors,
-                                    containerShape = RoundedCornerShape(LIBRARY_PLAYING_CORNER),
-                                ),
-                            )
+                        ReorderableItem(reorder, key = row.key, enabled = editable) {
+                            DismissibleRow(
+                                // By key: the row may have moved by the time it's settled off screen
+                                onDismissed = { mqState.removeEntry(row.key) },
+                                enabled = editable,
+                            ) {
+                                val duration = item.mediaMetadata.durationMs?.convertDurationToTimeStamp()
+                                val artist = item.mediaMetadata.artist?.toString() ?: unknownArtist
+                                EditableSongRow(
+                                    title = item.mediaMetadata.title?.toString().orEmpty(),
+                                    subtitle = stringResource(R.string.artist_time, duration ?: "", artist),
+                                    cover = item.mediaMetadata.artworkUri,
+                                    defaultCover = R.drawable.ic_default_cover,
+                                    onClick = { mqState.clickRow(index) },
+                                    onRemove = { mqState.removeRow(index) },
+                                    handleModifier = if (editable) Modifier.draggableHandle() else Modifier,
+                                    showControls = editable,
+                                    colors = nowPlayingRowColors(
+                                        isCurrent = index == mqState.currentMediaItemIndex,
+                                        colors = nowPlayingColors,
+                                        containerShape = RoundedCornerShape(LIBRARY_PLAYING_CORNER),
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
@@ -317,20 +225,57 @@ fun QueuePanel(
         }
         QueueFabs(
             onClear = {
-                onDismiss()
+                reveal.hide()
                 mqState.removeQueue()
             },
-            onScrollToPlaying = {
-                mqState.playlist.first.indexOfFirst { i ->
-                    i == (instance?.currentMediaItemIndex ?: 0)
-                }.takeIf { it != -1 }?.let { host.smoothScrollTo(it) }
-            },
+            onScrollToPlaying = mqState::smoothScrollToCurrent,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(bottom = navigationBar)
                 .padding(QUEUE_FAB_MARGIN),
         )
     }
+}
+
+/**
+ * The time left in the queue, ticking down on the second while it plays, and how long it is: as
+ * the old queue sheet's chronometer had it. Empty, but as tall, until the queue's loaded. Ticks
+ * only while [ticking]: with the queue down, its timer isn't kept up to date anyway.
+ */
+@Composable
+private fun QueueTimeLeft(timer: QueueTimer?, ticking: Boolean, modifier: Modifier = Modifier) {
+    val now by produceState(SystemClock.elapsedRealtime(), timer, ticking) {
+        value = SystemClock.elapsedRealtime()
+        if (timer == null || !timer.running || !ticking) return@produceState
+        while (true) {
+            val left = timer.remainingMs - (value - timer.atRealtime)
+            if (left <= 0) break
+            // Up to the next whole second, when what's shown changes
+            delay(left % 1000 + 1)
+            value = SystemClock.elapsedRealtime()
+        }
+    }
+    val text = if (timer == null) {
+        ""
+    } else {
+        val left = if (timer.running) timer.remainingMs - (now - timer.atRealtime) else timer.remainingMs
+        // Rounded up, to read 0:00 only once it's over
+        val leftSeconds = (left.coerceAtLeast(0) + 999) / 1000
+        stringResource(
+            R.string.duration_queue,
+            (leftSeconds * 1000).convertDurationToTimeStamp(true),
+            timer.totalMs.convertDurationToTimeStamp(true),
+        )
+    }
+    Text(
+        text,
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelLarge,
+    )
 }
 
 /** Over the end of the queue: clearing it, small, and back to the song playing. */

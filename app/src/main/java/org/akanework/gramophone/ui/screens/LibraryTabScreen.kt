@@ -1,5 +1,5 @@
 /*
- *     Copyright (C) 2024 Akane Foundation
+ *     Copyright (C) 2026 Akane Foundation
  *
  *     Gramophone is free software: you can redistribute it and/or modify
  *     it under the terms of the GNU General Public License as published by
@@ -43,18 +43,15 @@ import org.akanework.gramophone.ui.actions.LibraryActions
 import org.akanework.gramophone.ui.actions.PlaylistDialogs
 import org.akanework.gramophone.ui.actions.rememberAppActionEnv
 import org.akanework.gramophone.ui.components.home.DECOR_HEIGHT
-import org.akanework.gramophone.ui.components.home.IosOverscrollState
 import org.akanework.gramophone.ui.components.home.LIBRARY_GROUP_CORNER
 import org.akanework.gramophone.ui.components.home.LIBRARY_ITEM_GAP
 import org.akanework.gramophone.ui.components.home.LIST_HEIGHT
 import org.akanework.gramophone.ui.components.home.LibraryFastScroller
 import org.akanework.gramophone.ui.components.home.LibraryHeader
 import org.akanework.gramophone.ui.components.home.NowPlayingState
-import org.akanework.gramophone.ui.components.home.iosOverscroll
 import org.akanework.gramophone.ui.components.home.libraryCellShape
 import org.akanework.gramophone.ui.components.home.libraryItemCard
 import org.akanework.gramophone.ui.components.home.libraryItemShape
-import org.akanework.gramophone.ui.components.home.rememberIosFlingBehavior
 import org.akanework.gramophone.ui.library.isGrid
 import org.akanework.gramophone.ui.state.LibraryTabSpec
 import org.akanework.gramophone.ui.state.LibraryTabState
@@ -62,14 +59,13 @@ import uk.akane.libphonograph.items.Album
 
 /**
  * One of the simple library tabs: the header with the item count, the play, shuffle and sort
- * buttons, then the list / grid of items, scrolling with iOS physics.
+ * buttons, then the list / grid of items.
  */
 @Composable
 fun <T : Any> LibraryTabScreen(
     state: LibraryTabState<T>,
     nowPlaying: NowPlayingState,
     reselectTick: Int,
-    overscroll: IosOverscrollState,
     modifier: Modifier = Modifier,
 ) {
     val env = rememberAppActionEnv()
@@ -101,19 +97,21 @@ fun <T : Any> LibraryTabScreen(
             }
         }
     } else null
-    LaunchedEffect(reselectTick) { if (reselectTick > 0) goToPlayingSong?.invoke() }
+    // Only a tap after this page was made counts. The home keeps each tab's count, and the pager
+    // makes a page it dropped again, which must not take the last tap for a new one.
+    val firstTick = remember { reselectTick }
+    LaunchedEffect(reselectTick) { if (reselectTick > firstTick) goToPlayingSong?.invoke() }
     var sortMenuOpen by remember { mutableStateOf(false) }
+    val keys = remember(items) { uniqueKeys(items, spec.helper::getId) }
     val gapPx = with(density) { LIBRARY_ITEM_GAP.roundToPx() }
     Box(modifier.fillMaxSize()) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         state = gridState,
-        modifier = Modifier.fillMaxSize().iosOverscroll(overscroll),
+        modifier = Modifier.fillMaxSize(),
         contentPadding = libraryContentPadding(),
         verticalArrangement = Arrangement.spacedBy(LIBRARY_ITEM_GAP),
         horizontalArrangement = if (isGrid) Arrangement.spacedBy(LIBRARY_ITEM_GAP) else Arrangement.Start,
-        flingBehavior = rememberIosFlingBehavior(gridState),
-        overscrollEffect = null,
     ) {
         // The header opens the group of cards, so the items under it don't.
         item(key = "header", span = { GridItemSpan(maxLineSpan) }) {
@@ -151,9 +149,9 @@ fun <T : Any> LibraryTabScreen(
                 sortMenu = { LibrarySortMenu(state, sortMenuOpen, onDismiss = { sortMenuOpen = false }) },
             )
         }
-        itemsIndexed(items, key = { _, it -> spec.helper.getId(it) }) { index, item ->
+        itemsIndexed(items, key = { index, _ -> keys[index] }) { index, item ->
             LibraryItem(
-                state, item, nowPlaying, env, layoutType,
+                state, item, index, nowPlaying, env, layoutType,
                 Modifier.animateItem(),
                 cardShape = { libraryCellShape(index, items.size, columns, it) },
             )
